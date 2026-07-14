@@ -1,12 +1,562 @@
 import { Hono } from 'hono'
-import { renderer } from './renderer'
+import { cors } from 'hono/cors'
+import { serveStatic } from 'hono/cloudflare-workers'
 
+// ─── In-Memory Store (KV-ready interface) ───────────────────────────────────
+let orderSeq = 100
+const orders: Order[] = []
+const menuItems: MenuItem[] = getDefaultMenu()
+const settings: AppSettings = {
+  businessName: 'Street Eats Trailer',
+  taxRate: 0.08,
+  stripeMode: false,
+  stripePublishableKey: '',
+  operatingHours: '11am – 9pm',
+  tagline: 'Fresh. Fast. Fired Up.',
+}
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+type OrderStatus = 'paid' | 'queued' | 'in_prep' | 'ready' | 'completed' | 'cancelled' | 'refunded'
+type Channel = 'kiosk' | 'staff' | 'online'
+
+interface OrderItem {
+  id: string
+  name: string
+  price: number
+  quantity: number
+  modifiers: string[]
+  notes: string
+}
+
+interface Order {
+  id: string
+  ticketNumber: number
+  customerName: string
+  channel: Channel
+  items: OrderItem[]
+  subtotal: number
+  tax: number
+  total: number
+  status: OrderStatus
+  paymentMethod: string
+  paymentIntentId?: string
+  createdAt: string
+  updatedAt: string
+  statusHistory: { status: string; at: string }[]
+  notes: string
+  priority: boolean
+}
+
+interface MenuItem {
+  id: string
+  name: string
+  description: string
+  price: number
+  category: string
+  image: string
+  available: boolean
+  popular: boolean
+  allergens: string[]
+  modifiers: ModifierGroup[]
+  prepTime: number
+  calories?: number
+}
+
+interface ModifierGroup {
+  name: string
+  required: boolean
+  multiple: boolean
+  options: { name: string; price: number }[]
+}
+
+interface AppSettings {
+  businessName: string
+  taxRate: number
+  stripeMode: boolean
+  stripePublishableKey: string
+  operatingHours: string
+  tagline: string
+}
+
+// ─── Default Menu ────────────────────────────────────────────────────────────
+function getDefaultMenu(): MenuItem[] {
+  return [
+    {
+      id: 'smash-burger', name: 'Smash Burger', description: 'Double smash patty, American cheese, house sauce, pickles, onion', price: 1250, category: 'Burgers',
+      image: '🍔', available: true, popular: true, allergens: ['gluten', 'dairy'], prepTime: 8, calories: 680,
+      modifiers: [
+        { name: 'Size', required: true, multiple: false, options: [{ name: 'Single', price: 0 }, { name: 'Double', price: 300 }, { name: 'Triple', price: 600 }] },
+        { name: 'Add-ons', required: false, multiple: true, options: [{ name: 'Bacon', price: 150 }, { name: 'Egg', price: 100 }, { name: 'Avocado', price: 200 }] }
+      ]
+    },
+    {
+      id: 'spicy-chicken', name: 'Nashville Hot Chicken', description: 'Crispy thigh, Nashville hot sauce, coleslaw, pickles, brioche bun', price: 1350, category: 'Sandwiches',
+      image: '🌶️', available: true, popular: true, allergens: ['gluten', 'dairy'], prepTime: 10, calories: 720,
+      modifiers: [
+        { name: 'Heat Level', required: true, multiple: false, options: [{ name: 'Mild', price: 0 }, { name: 'Medium', price: 0 }, { name: 'Hot', price: 0 }, { name: 'Extra Hot', price: 0 }] }
+      ]
+    },
+    {
+      id: 'bbq-brisket', name: 'BBQ Brisket Sandwich', description: 'Slow-smoked brisket, housemade BBQ, pickled jalapeños, brioche', price: 1550, category: 'Sandwiches',
+      image: '🥩', available: true, popular: false, allergens: ['gluten'], prepTime: 5, calories: 810,
+      modifiers: []
+    },
+    {
+      id: 'loaded-fries', name: 'Loaded Fries', description: 'Thick-cut fries, cheese sauce, bacon bits, jalapeños, green onion', price: 950, category: 'Sides',
+      image: '🍟', available: true, popular: true, allergens: ['dairy'], prepTime: 6, calories: 580,
+      modifiers: [
+        { name: 'Protein', required: false, multiple: false, options: [{ name: 'None', price: 0 }, { name: 'Pulled Pork +$3', price: 300 }, { name: 'Brisket +$4', price: 400 }] }
+      ]
+    },
+    {
+      id: 'onion-rings', name: 'Onion Rings', description: 'Beer-battered, golden fried, served with dipping sauce', price: 750, category: 'Sides',
+      image: '🧅', available: true, popular: false, allergens: ['gluten'], prepTime: 5, calories: 420,
+      modifiers: []
+    },
+    {
+      id: 'mac-cheese', name: 'Mac & Cheese', description: 'Creamy three-cheese blend, toasted breadcrumbs', price: 850, category: 'Sides',
+      image: '🧀', available: true, popular: false, allergens: ['gluten', 'dairy'], prepTime: 4, calories: 490,
+      modifiers: []
+    },
+    {
+      id: 'elote-corn', name: 'Street Corn (Elote)', description: 'Grilled corn, mayo, cotija, chili powder, lime', price: 600, category: 'Sides',
+      image: '🌽', available: true, popular: true, allergens: ['dairy'], prepTime: 5, calories: 320,
+      modifiers: []
+    },
+    {
+      id: 'craft-lemonade', name: 'Craft Lemonade', description: 'Fresh-squeezed with seasonal syrups', price: 450, category: 'Drinks',
+      image: '🍋', available: true, popular: false, allergens: [], prepTime: 2, calories: 150,
+      modifiers: [
+        { name: 'Flavor', required: true, multiple: false, options: [{ name: 'Original', price: 0 }, { name: 'Strawberry', price: 0 }, { name: 'Mango', price: 0 }, { name: 'Lavender', price: 0 }] }
+      ]
+    },
+    {
+      id: 'fountain-drink', name: 'Fountain Drink', description: 'Assorted sodas and iced tea', price: 300, category: 'Drinks',
+      image: '🥤', available: true, popular: false, allergens: [], prepTime: 1, calories: 200,
+      modifiers: [
+        { name: 'Size', required: true, multiple: false, options: [{ name: 'Small', price: 0 }, { name: 'Medium', price: 50 }, { name: 'Large', price: 100 }] }
+      ]
+    },
+    {
+      id: 'water-bottle', name: 'Bottled Water', description: 'Cold purified water', price: 200, category: 'Drinks',
+      image: '💧', available: true, popular: false, allergens: [], prepTime: 0, calories: 0,
+      modifiers: []
+    },
+    {
+      id: 'brownie', name: 'Fudge Brownie', description: 'House-baked, rich chocolate fudge brownie', price: 500, category: 'Desserts',
+      image: '🍫', available: true, popular: false, allergens: ['gluten', 'dairy', 'eggs'], prepTime: 1, calories: 380,
+      modifiers: []
+    },
+    {
+      id: 'churro', name: 'Churro Bites', description: 'Crispy fried dough, cinnamon sugar, chocolate dipping sauce', price: 550, category: 'Desserts',
+      image: '🥐', available: true, popular: true, allergens: ['gluten', 'dairy', 'eggs'], prepTime: 4, calories: 340,
+      modifiers: []
+    },
+  ]
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+function uid() {
+  return Math.random().toString(36).slice(2, 10).toUpperCase()
+}
+
+function now() {
+  return new Date().toISOString()
+}
+
+function calcOrder(items: OrderItem[], taxRate: number) {
+  const subtotal = items.reduce((s, i) => s + i.price * i.quantity, 0)
+  const tax = Math.round(subtotal * taxRate)
+  return { subtotal, tax, total: subtotal + tax }
+}
+
+// ─── App ─────────────────────────────────────────────────────────────────────
 const app = new Hono()
+app.use('*', cors())
 
-app.use(renderer)
+// Static assets (CSS, JS, fonts, webfonts)
+app.use('/static/*', serveStatic({ root: './public' }))
 
-app.get('/', (c) => {
-  return c.render(<h1>Hello!</h1>)
+// ══════════════════════════════════════════════════════════════════
+// PUBLIC API — MENU
+// ══════════════════════════════════════════════════════════════════
+app.get('/api/menu', (c) => {
+  const categories = [...new Set(menuItems.map(i => i.category))]
+  return c.json({ menu: menuItems, categories, settings })
 })
+
+app.get('/api/menu/:id', (c) => {
+  const item = menuItems.find(i => i.id === c.req.param('id'))
+  if (!item) return c.json({ error: 'Not found' }, 404)
+  return c.json(item)
+})
+
+// ══════════════════════════════════════════════════════════════════
+// PUBLIC API — ORDERS (kiosk checkout)
+// ══════════════════════════════════════════════════════════════════
+app.post('/api/orders', async (c) => {
+  const body = await c.req.json()
+  const { customerName = 'Guest', items: rawItems = [], notes = '', channel = 'kiosk' } = body
+
+  if (!rawItems.length) return c.json({ error: 'Cart is empty' }, 400)
+
+  const items: OrderItem[] = rawItems.map((ri: any) => {
+    const m = menuItems.find(m => m.id === ri.id)
+    if (!m) throw new Error(`Unknown item ${ri.id}`)
+    return {
+      id: m.id,
+      name: m.name,
+      price: m.price,
+      quantity: ri.quantity || 1,
+      modifiers: ri.modifiers || [],
+      notes: ri.notes || '',
+    }
+  })
+
+  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
+  const order: Order = {
+    id: uid(),
+    ticketNumber: ++orderSeq,
+    customerName: customerName || 'Guest',
+    channel: channel as Channel,
+    items,
+    subtotal,
+    tax,
+    total,
+    status: 'paid',
+    paymentMethod: 'demo',
+    createdAt: now(),
+    updatedAt: now(),
+    statusHistory: [{ status: 'paid', at: now() }],
+    notes,
+    priority: false,
+  }
+  orders.unshift(order)
+  return c.json({ order }, 201)
+})
+
+app.get('/api/orders/:id', (c) => {
+  const o = orders.find(o => o.id === c.req.param('id'))
+  if (!o) return c.json({ error: 'Not found' }, 404)
+  return c.json(o)
+})
+
+// ══════════════════════════════════════════════════════════════════
+// STRIPE TERMINAL ENDPOINTS
+// ══════════════════════════════════════════════════════════════════
+app.post('/api/connection_token', async (c) => {
+  const STRIPE_KEY = (c.env as any)?.STRIPE_SECRET_KEY || ''
+  if (!STRIPE_KEY) return c.json({ error: 'Stripe not configured' }, 400)
+  const res = await fetch('https://api.stripe.com/v1/terminal/connection_tokens', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${STRIPE_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+  })
+  const data: any = await res.json()
+  if (!res.ok) return c.json({ error: data.error?.message }, 400)
+  return c.json({ secret: data.secret })
+})
+
+app.post('/api/payments/create-intent', async (c) => {
+  const STRIPE_KEY = (c.env as any)?.STRIPE_SECRET_KEY || ''
+  if (!STRIPE_KEY) return c.json({ error: 'Stripe not configured' }, 400)
+  const body = await c.req.json()
+  const { customerName = 'Guest', items: rawItems = [], notes = '' } = body
+
+  const items: OrderItem[] = rawItems.map((ri: any) => {
+    const m = menuItems.find(m => m.id === ri.id)
+    if (!m) throw new Error(`Unknown item ${ri.id}`)
+    return { id: m.id, name: m.name, price: m.price, quantity: ri.quantity || 1, modifiers: ri.modifiers || [], notes: ri.notes || '' }
+  })
+  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
+
+  const params = new URLSearchParams({
+    amount: String(total),
+    currency: 'usd',
+    payment_method_types: 'card_present',
+    capture_method: 'automatic',
+    'metadata[customerName]': customerName,
+    'metadata[itemCount]': String(items.length),
+  })
+  const res = await fetch('https://api.stripe.com/v1/payment_intents', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${STRIPE_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  })
+  const data: any = await res.json()
+  if (!res.ok) return c.json({ error: data.error?.message }, 400)
+
+  // Pre-create draft order
+  const order: Order = {
+    id: uid(),
+    ticketNumber: ++orderSeq,
+    customerName,
+    channel: 'kiosk',
+    items,
+    subtotal,
+    tax,
+    total,
+    status: 'paid',
+    paymentMethod: 'stripe_terminal',
+    paymentIntentId: data.id,
+    createdAt: now(),
+    updatedAt: now(),
+    statusHistory: [{ status: 'paid', at: now() }],
+    notes,
+    priority: false,
+  }
+  orders.unshift(order)
+
+  return c.json({ clientSecret: data.client_secret, orderId: order.id, total })
+})
+
+app.post('/api/webhooks/stripe', async (c) => {
+  // In production: verify Stripe-Signature header
+  const body = await c.req.json()
+  const { type, data } = body
+  if (type === 'payment_intent.succeeded') {
+    const pi = data.object
+    const order = orders.find(o => o.paymentIntentId === pi.id)
+    if (order && order.status === 'paid') {
+      order.status = 'queued'
+      order.updatedAt = now()
+      order.statusHistory.push({ status: 'queued', at: now() })
+    }
+  }
+  return c.json({ received: true })
+})
+
+// ══════════════════════════════════════════════════════════════════
+// KITCHEN DISPLAY (KDS)
+// ══════════════════════════════════════════════════════════════════
+app.get('/api/kds', (c) => {
+  const active = orders.filter(o => ['paid', 'queued', 'in_prep', 'ready'].includes(o.status))
+  return c.json({ orders: active })
+})
+
+app.patch('/api/kds/:id/status', async (c) => {
+  const o = orders.find(o => o.id === c.req.param('id'))
+  if (!o) return c.json({ error: 'Not found' }, 404)
+  const { status } = await c.req.json()
+  const allowed: OrderStatus[] = ['queued', 'in_prep', 'ready', 'completed']
+  if (!allowed.includes(status as OrderStatus)) return c.json({ error: 'Invalid status' }, 400)
+  o.status = status as OrderStatus
+  o.updatedAt = now()
+  o.statusHistory.push({ status, at: now() })
+  return c.json(o)
+})
+
+// ══════════════════════════════════════════════════════════════════
+// ADMIN API
+// ══════════════════════════════════════════════════════════════════
+app.get('/api/admin/orders', (c) => {
+  const status = c.req.query('status')
+  const channel = c.req.query('channel')
+  let result = [...orders]
+  if (status) result = result.filter(o => o.status === status)
+  if (channel) result = result.filter(o => o.channel === channel)
+  return c.json({ orders: result, total: result.length })
+})
+
+app.patch('/api/admin/orders/:id/status', async (c) => {
+  const o = orders.find(o => o.id === c.req.param('id'))
+  if (!o) return c.json({ error: 'Not found' }, 404)
+  const { status } = await c.req.json()
+  o.status = status as OrderStatus
+  o.updatedAt = now()
+  o.statusHistory.push({ status, at: now() })
+  return c.json(o)
+})
+
+app.patch('/api/admin/orders/:id/priority', async (c) => {
+  const o = orders.find(o => o.id === c.req.param('id'))
+  if (!o) return c.json({ error: 'Not found' }, 404)
+  const { priority } = await c.req.json()
+  o.priority = priority
+  o.updatedAt = now()
+  return c.json(o)
+})
+
+app.post('/api/admin/orders/:id/refund', async (c) => {
+  const o = orders.find(o => o.id === c.req.param('id'))
+  if (!o) return c.json({ error: 'Not found' }, 404)
+  o.status = 'refunded'
+  o.updatedAt = now()
+  o.statusHistory.push({ status: 'refunded', at: now() })
+  return c.json(o)
+})
+
+// Admin — Menu Management
+app.get('/api/admin/menu', (c) => c.json({ menu: menuItems }))
+
+app.patch('/api/admin/menu/:id', async (c) => {
+  const item = menuItems.find(i => i.id === c.req.param('id'))
+  if (!item) return c.json({ error: 'Not found' }, 404)
+  const body = await c.req.json()
+  Object.assign(item, body)
+  return c.json(item)
+})
+
+app.post('/api/admin/menu', async (c) => {
+  const body = await c.req.json()
+  const item: MenuItem = {
+    id: body.name.toLowerCase().replace(/\s+/g, '-') + '-' + uid().slice(0, 4),
+    name: body.name,
+    description: body.description || '',
+    price: body.price || 0,
+    category: body.category || 'Other',
+    image: body.image || '🍽️',
+    available: true,
+    popular: false,
+    allergens: body.allergens || [],
+    modifiers: body.modifiers || [],
+    prepTime: body.prepTime || 5,
+    calories: body.calories,
+  }
+  menuItems.push(item)
+  return c.json(item, 201)
+})
+
+// Admin — Analytics
+app.get('/api/admin/analytics', (c) => {
+  const completed = orders.filter(o => ['completed', 'ready'].includes(o.status))
+  const allPaid = orders.filter(o => o.status !== 'cancelled' && o.status !== 'refunded')
+  const revenue = allPaid.reduce((s, o) => s + o.total, 0)
+  const itemFreq: Record<string, number> = {}
+  allPaid.forEach(o => o.items.forEach(i => {
+    itemFreq[i.name] = (itemFreq[i.name] || 0) + i.quantity
+  }))
+  const topItems = Object.entries(itemFreq).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count }))
+  const byHour: Record<string, number> = {}
+  allPaid.forEach(o => {
+    const h = new Date(o.createdAt).getHours()
+    const label = `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`
+    byHour[label] = (byHour[label] || 0) + o.total
+  })
+  return c.json({
+    totalOrders: allPaid.length,
+    revenue,
+    avgOrderValue: allPaid.length ? Math.round(revenue / allPaid.length) : 0,
+    completedOrders: completed.length,
+    refundedOrders: orders.filter(o => o.status === 'refunded').length,
+    topItems,
+    byHour,
+    byChannel: {
+      kiosk: allPaid.filter(o => o.channel === 'kiosk').length,
+      staff: allPaid.filter(o => o.channel === 'staff').length,
+      online: allPaid.filter(o => o.channel === 'online').length,
+    }
+  })
+})
+
+// Admin — Settings
+app.get('/api/admin/settings', (c) => c.json(settings))
+app.patch('/api/admin/settings', async (c) => {
+  const body = await c.req.json()
+  Object.assign(settings, body)
+  return c.json(settings)
+})
+
+// Admin — Seed demo orders
+app.post('/api/admin/seed', (c) => {
+  const names = ['Alex', 'Jordan', 'Sam', 'Casey', 'Riley', 'Morgan', 'Drew']
+  const statuses: OrderStatus[] = ['paid', 'queued', 'in_prep', 'ready', 'completed']
+  for (let i = 0; i < 8; i++) {
+    const item1 = menuItems[Math.floor(Math.random() * 4)]
+    const item2 = menuItems[4 + Math.floor(Math.random() * 4)]
+    const items: OrderItem[] = [
+      { id: item1.id, name: item1.name, price: item1.price, quantity: 1, modifiers: [], notes: '' },
+      { id: item2.id, name: item2.name, price: item2.price, quantity: 1, modifiers: [], notes: '' },
+    ]
+    const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
+    const status = statuses[Math.floor(Math.random() * statuses.length)]
+    orders.unshift({
+      id: uid(),
+      ticketNumber: ++orderSeq,
+      customerName: names[Math.floor(Math.random() * names.length)],
+      channel: 'kiosk',
+      items,
+      subtotal, tax, total,
+      status,
+      paymentMethod: 'demo',
+      createdAt: new Date(Date.now() - Math.random() * 3600000).toISOString(),
+      updatedAt: now(),
+      statusHistory: [{ status, at: now() }],
+      notes: '',
+      priority: Math.random() > 0.8,
+    })
+  }
+  return c.json({ seeded: 8 })
+})
+
+// Health
+app.get('/api/health', (c) => c.json({ ok: true, orders: orders.length, menu: menuItems.length }))
+
+// ══════════════════════════════════════════════════════════════════
+// PAGE ROUTES — serve HTML shells
+// ══════════════════════════════════════════════════════════════════
+app.get('/', (c) => c.redirect('/kiosk'))
+app.get('/kiosk', (c) => c.html(kioskHTML()))
+app.get('/kds', (c) => c.html(kdsHTML()))
+app.get('/admin', (c) => c.html(adminHTML()))
+app.get('/admin/*', (c) => c.html(adminHTML()))
+
+// ══════════════════════════════════════════════════════════════════
+// HTML PAGE GENERATORS
+// ══════════════════════════════════════════════════════════════════
+function kioskHTML() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>Food Trailer Kiosk</title>
+  <script src="/static/tailwind.min.js"></script>
+  <script src="https://js.stripe.com/terminal/v1/"></script>
+  <link rel="stylesheet" href="/static/fa.min.css"/>
+  <link rel="stylesheet" href="/static/kiosk.css"/>
+</head>
+<body class="bg-gray-950 text-white min-h-screen">
+  <div id="app"></div>
+  <script src="/static/kiosk.js"></script>
+</body>
+</html>`
+}
+
+function kdsHTML() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kitchen Display</title>
+  <script src="/static/tailwind.min.js"></script>
+  <link rel="stylesheet" href="/static/fa.min.css"/>
+  <link rel="stylesheet" href="/static/kds.css"/>
+</head>
+<body class="bg-gray-950 text-white min-h-screen">
+  <div id="app"></div>
+  <script src="/static/kds.js"></script>
+</body>
+</html>`
+}
+
+function adminHTML() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Dashboard</title>
+  <script src="/static/tailwind.min.js"></script>
+  <script src="/static/chart.min.js"></script>
+  <link rel="stylesheet" href="/static/fa.min.css"/>
+  <link rel="stylesheet" href="/static/admin.css"/>
+</head>
+<body class="bg-gray-950 text-white min-h-screen">
+  <div id="app"></div>
+  <script src="/static/admin.js"></script>
+</body>
+</html>`
+}
 
 export default app
