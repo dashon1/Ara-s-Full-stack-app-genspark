@@ -424,9 +424,9 @@ async function init() {
 document.getElementById('app').innerHTML = `
   <div class="kiosk-header">
     <div class="kiosk-logo">
-      <span class="icon">🚚</span>
+      <span class="icon">🍦</span>
       <div>
-        <h1 id="bizName">Food Trailer <span>Kiosk</span></h1>
+        <h1 id="bizName">Ara's <span>DNA</span></h1>
         <div id="bizTagline" style="font-size:11px;color:#6b7280;margin-top:1px"></div>
       </div>
     </div>

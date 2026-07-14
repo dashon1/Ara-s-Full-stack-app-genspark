@@ -7,12 +7,12 @@ let orderSeq = 100
 const orders: Order[] = []
 const menuItems: MenuItem[] = getDefaultMenu()
 const settings: AppSettings = {
-  businessName: 'Street Eats Trailer',
+  businessName: "Ara's DNA",
   taxRate: 0.08,
   stripeMode: false,
   stripePublishableKey: '',
-  operatingHours: '11am – 9pm',
-  tagline: 'Fresh. Fast. Fired Up.',
+  operatingHours: 'Call 813-522-3553',
+  tagline: 'Hand-Crafted Ice Cream · Island Ice · Hot Dogs',
 }
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -78,79 +78,383 @@ interface AppSettings {
   tagline: string
 }
 
-// ─── Default Menu ────────────────────────────────────────────────────────────
+// ─── Ara's DNA Menu ──────────────────────────────────────────────────────────
 function getDefaultMenu(): MenuItem[] {
   return [
+
+    // ── HOT DOGS ─────────────────────────────────────────────────────────────
     {
-      id: 'smash-burger', name: 'Smash Burger', description: 'Double smash patty, American cheese, house sauce, pickles, onion', price: 1250, category: 'Burgers',
-      image: '🍔', available: true, popular: true, allergens: ['gluten', 'dairy'], prepTime: 8, calories: 680,
+      id: 'hotdog-classic',
+      name: "Ara's All Beef Signature Hotdog",
+      description: 'All-beef hot dog plus condiments. Order two and save!',
+      price: 500,
+      category: 'Hot Dogs',
+      image: '🌭',
+      available: true,
+      popular: true,
+      allergens: ['gluten'],
+      prepTime: 4,
+      calories: 320,
       modifiers: [
-        { name: 'Size', required: true, multiple: false, options: [{ name: 'Single', price: 0 }, { name: 'Double', price: 300 }, { name: 'Triple', price: 600 }] },
-        { name: 'Add-ons', required: false, multiple: true, options: [{ name: 'Bacon', price: 150 }, { name: 'Egg', price: 100 }, { name: 'Avocado', price: 200 }] }
+        {
+          name: 'How Many?',
+          required: true,
+          multiple: false,
+          options: [
+            { name: '1 Dog – $5.00', price: 0 },
+            { name: '2 Dogs – $8.00 (save $2)', price: 300 },
+          ]
+        },
+        {
+          name: 'Condiments',
+          required: false,
+          multiple: true,
+          options: [
+            { name: 'Mustard', price: 0 },
+            { name: 'Ketchup', price: 0 },
+            { name: 'Relish', price: 0 },
+            { name: 'Onions', price: 0 },
+            { name: 'Sauerkraut', price: 0 },
+          ]
+        }
       ]
     },
     {
-      id: 'spicy-chicken', name: 'Nashville Hot Chicken', description: 'Crispy thigh, Nashville hot sauce, coleslaw, pickles, brioche bun', price: 1350, category: 'Sandwiches',
-      image: '🌶️', available: true, popular: true, allergens: ['gluten', 'dairy'], prepTime: 10, calories: 720,
+      id: 'hotdog-jumbo',
+      name: "Ara's Jumbo Dog 1/4 Lb",
+      description: "Big quarter-pound all-beef dog — Ara's signature jumbo size plus condiments.",
+      price: 675,
+      category: 'Hot Dogs',
+      image: '🌭',
+      available: true,
+      popular: true,
+      allergens: ['gluten'],
+      prepTime: 5,
+      calories: 480,
       modifiers: [
-        { name: 'Heat Level', required: true, multiple: false, options: [{ name: 'Mild', price: 0 }, { name: 'Medium', price: 0 }, { name: 'Hot', price: 0 }, { name: 'Extra Hot', price: 0 }] }
+        {
+          name: 'Condiments',
+          required: false,
+          multiple: true,
+          options: [
+            { name: 'Mustard', price: 0 },
+            { name: 'Ketchup', price: 0 },
+            { name: 'Relish', price: 0 },
+            { name: 'Onions', price: 0 },
+            { name: 'Sauerkraut', price: 0 },
+          ]
+        }
       ]
     },
     {
-      id: 'bbq-brisket', name: 'BBQ Brisket Sandwich', description: 'Slow-smoked brisket, housemade BBQ, pickled jalapeños, brioche', price: 1550, category: 'Sandwiches',
-      image: '🥩', available: true, popular: false, allergens: ['gluten'], prepTime: 5, calories: 810,
-      modifiers: []
-    },
-    {
-      id: 'loaded-fries', name: 'Loaded Fries', description: 'Thick-cut fries, cheese sauce, bacon bits, jalapeños, green onion', price: 950, category: 'Sides',
-      image: '🍟', available: true, popular: true, allergens: ['dairy'], prepTime: 6, calories: 580,
+      id: 'chilidog',
+      name: "Ara's Signature Chili Dog",
+      description: "All-beef dog smothered in Ara's signature chili plus condiments. Get two and save!",
+      price: 600,
+      category: 'Hot Dogs',
+      image: '🌭',
+      available: true,
+      popular: true,
+      allergens: ['gluten'],
+      prepTime: 5,
+      calories: 420,
       modifiers: [
-        { name: 'Protein', required: false, multiple: false, options: [{ name: 'None', price: 0 }, { name: 'Pulled Pork +$3', price: 300 }, { name: 'Brisket +$4', price: 400 }] }
+        {
+          name: 'How Many?',
+          required: true,
+          multiple: false,
+          options: [
+            { name: '1 Chili Dog – $6.00', price: 0 },
+            { name: '2 Chili Dogs – $10.50 (save $1.50)', price: 450 },
+          ]
+        },
+        {
+          name: 'Extra Toppings & Layer-Ins',
+          required: false,
+          multiple: true,
+          options: [
+            { name: 'Extra Chili +$3.00', price: 300 },
+            { name: 'Extra Cheese +$3.00', price: 300 },
+            { name: 'Onions', price: 0 },
+            { name: 'Mustard', price: 0 },
+          ]
+        }
       ]
     },
     {
-      id: 'onion-rings', name: 'Onion Rings', description: 'Beer-battered, golden fried, served with dipping sauce', price: 750, category: 'Sides',
-      image: '🧅', available: true, popular: false, allergens: ['gluten'], prepTime: 5, calories: 420,
-      modifiers: []
-    },
-    {
-      id: 'mac-cheese', name: 'Mac & Cheese', description: 'Creamy three-cheese blend, toasted breadcrumbs', price: 850, category: 'Sides',
-      image: '🧀', available: true, popular: false, allergens: ['gluten', 'dairy'], prepTime: 4, calories: 490,
-      modifiers: []
-    },
-    {
-      id: 'elote-corn', name: 'Street Corn (Elote)', description: 'Grilled corn, mayo, cotija, chili powder, lime', price: 600, category: 'Sides',
-      image: '🌽', available: true, popular: true, allergens: ['dairy'], prepTime: 5, calories: 320,
-      modifiers: []
-    },
-    {
-      id: 'craft-lemonade', name: 'Craft Lemonade', description: 'Fresh-squeezed with seasonal syrups', price: 450, category: 'Drinks',
-      image: '🍋', available: true, popular: false, allergens: [], prepTime: 2, calories: 150,
+      id: 'beef-sausage',
+      name: "Ara's Beef Smoked Sausage",
+      description: "Ara's signature smoked beef sausage. Bold, smoky, and satisfying.",
+      price: 700,
+      category: 'Hot Dogs',
+      image: '🥩',
+      available: true,
+      popular: false,
+      allergens: ['gluten'],
+      prepTime: 5,
+      calories: 510,
       modifiers: [
-        { name: 'Flavor', required: true, multiple: false, options: [{ name: 'Original', price: 0 }, { name: 'Strawberry', price: 0 }, { name: 'Mango', price: 0 }, { name: 'Lavender', price: 0 }] }
+        {
+          name: 'How Many?',
+          required: true,
+          multiple: false,
+          options: [
+            { name: '1 Sausage – $7.00', price: 0 },
+            { name: '2 Sausages – $12.50 (save $1.50)', price: 550 },
+          ]
+        }
+      ]
+    },
+
+    // ── ICE CREAM ────────────────────────────────────────────────────────────
+    {
+      id: 'ice-cream',
+      name: 'Hand-Crafted Old-Fashioned Ice Cream',
+      description: 'Rich, creamy hand-crafted ice cream made the old-fashioned way. Pick your size and flavor.',
+      price: 550,
+      category: 'Ice Cream',
+      image: '🍦',
+      available: true,
+      popular: true,
+      allergens: ['dairy', 'eggs'],
+      prepTime: 2,
+      calories: 280,
+      modifiers: [
+        {
+          name: 'Size',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Kids 4 oz – $5.50', price: 0 },
+            { name: 'Regular 8 oz – $7.50', price: 200 },
+            { name: 'Large 12 oz – $10.75', price: 525 },
+            { name: 'Pint – $12.75', price: 725 },
+          ]
+        },
+        {
+          name: 'Flavor',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Vanilla', price: 0 },
+            { name: 'Chocolate', price: 0 },
+            { name: 'Strawberry', price: 0 },
+            { name: 'Cookies & Cream', price: 0 },
+            { name: 'Butter Pecan', price: 0 },
+            { name: 'Neapolitan', price: 0 },
+          ]
+        },
+        {
+          name: 'Extra Toppings & Layer-Ins',
+          required: false,
+          multiple: true,
+          options: [
+            { name: 'Extra Toppings / Layer-Ins +$3.00', price: 300 },
+          ]
+        }
+      ]
+    },
+
+    // ── ISLAND ICE (PREMIUM) ─────────────────────────────────────────────────
+    {
+      id: 'island-ice',
+      name: 'Island Ice (Premium Italian Ice)',
+      description: "Premium old-fashioned Italian Ice — smooth, bold flavors. Pair it with ice cream for the ultimate combo!",
+      price: 450,
+      category: 'Island Ice',
+      image: '🧊',
+      available: true,
+      popular: true,
+      allergens: [],
+      prepTime: 2,
+      calories: 160,
+      modifiers: [
+        {
+          name: 'Size',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Kids 4 oz – $4.50', price: 0 },
+            { name: 'Regular 9 oz – $6.50', price: 200 },
+            { name: 'Large 12 oz – $9.75', price: 525 },
+            { name: 'Pint – $11.75', price: 725 },
+          ]
+        },
+        {
+          name: 'Flavor',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Mango', price: 0 },
+            { name: 'Strawberry', price: 0 },
+            { name: 'Blue Raspberry', price: 0 },
+            { name: 'Cherry', price: 0 },
+            { name: 'Pineapple', price: 0 },
+            { name: 'Watermelon', price: 0 },
+            { name: 'Peach', price: 0 },
+            { name: 'Lemon', price: 0 },
+          ]
+        },
+        {
+          name: 'Add Ice Cream Cream Layer?',
+          required: false,
+          multiple: false,
+          options: [
+            { name: 'Add Cream to Kids/Reg +$1.50', price: 150 },
+            { name: 'Add Cream to Large +$2.00', price: 200 },
+            { name: 'Add Cream to Pint +$2.50', price: 250 },
+          ]
+        }
+      ]
+    },
+
+    // ── SORBET ───────────────────────────────────────────────────────────────
+    {
+      id: 'sorbet',
+      name: 'Sorbet',
+      description: 'Light, refreshing fruit sorbet — dairy-free and bursting with real fruit flavor.',
+      price: 450,
+      category: 'Island Ice',
+      image: '🍧',
+      available: true,
+      popular: false,
+      allergens: [],
+      prepTime: 2,
+      calories: 120,
+      modifiers: [
+        {
+          name: 'Size',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Kids 4 oz – $4.50', price: 0 },
+            { name: 'Regular 9 oz – $6.50', price: 200 },
+            { name: 'Large 12 oz – $9.75', price: 525 },
+            { name: 'Pint – $11.75', price: 725 },
+          ]
+        },
+        {
+          name: 'Flavor',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Mango', price: 0 },
+            { name: 'Strawberry', price: 0 },
+            { name: 'Raspberry', price: 0 },
+            { name: 'Lemon', price: 0 },
+            { name: 'Watermelon', price: 0 },
+          ]
+        }
+      ]
+    },
+
+    // ── LEMONADE ─────────────────────────────────────────────────────────────
+    {
+      id: 'lemonade',
+      name: 'Fresh Lemonade',
+      description: 'Hand-crafted fresh-squeezed lemonade. Add a fruit flavor for +$1.50.',
+      price: 450,
+      category: 'Drinks',
+      image: '🍋',
+      available: true,
+      popular: true,
+      allergens: [],
+      prepTime: 3,
+      calories: 140,
+      modifiers: [
+        {
+          name: 'Size',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Small – $4.50', price: 0 },
+            { name: 'Medium – $7.00', price: 250 },
+            { name: 'Large – $10.00', price: 550 },
+          ]
+        },
+        {
+          name: 'Add a Flavor? (+$1.50)',
+          required: false,
+          multiple: false,
+          options: [
+            { name: 'Strawberry +$1.50', price: 150 },
+            { name: 'Blueberry +$1.50', price: 150 },
+            { name: 'Cherry +$1.50', price: 150 },
+            { name: 'Mango +$1.50', price: 150 },
+            { name: 'Peach +$1.50', price: 150 },
+            { name: 'Raspberry +$1.50', price: 150 },
+            { name: 'Watermelon +$1.50', price: 150 },
+            { name: 'Pineapple +$1.50', price: 150 },
+          ]
+        }
       ]
     },
     {
-      id: 'fountain-drink', name: 'Fountain Drink', description: 'Assorted sodas and iced tea', price: 300, category: 'Drinks',
-      image: '🥤', available: true, popular: false, allergens: [], prepTime: 1, calories: 200,
+      id: 'soda',
+      name: 'Canned Soda',
+      description: 'Ice-cold Coca-Cola, Sprite, and assorted cans.',
+      price: 300,
+      category: 'Drinks',
+      image: '🥤',
+      available: true,
+      popular: false,
+      allergens: [],
+      prepTime: 0,
+      calories: 150,
       modifiers: [
-        { name: 'Size', required: true, multiple: false, options: [{ name: 'Small', price: 0 }, { name: 'Medium', price: 50 }, { name: 'Large', price: 100 }] }
+        {
+          name: 'Choice',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Coca-Cola', price: 0 },
+            { name: 'Sprite', price: 0 },
+            { name: 'Other Assorted', price: 0 },
+          ]
+        }
       ]
     },
     {
-      id: 'water-bottle', name: 'Bottled Water', description: 'Cold purified water', price: 200, category: 'Drinks',
-      image: '💧', available: true, popular: false, allergens: [], prepTime: 0, calories: 0,
+      id: 'water',
+      name: 'Bottled Water',
+      description: 'Cold purified bottled water.',
+      price: 200,
+      category: 'Drinks',
+      image: '💧',
+      available: true,
+      popular: false,
+      allergens: [],
+      prepTime: 0,
+      calories: 0,
       modifiers: []
     },
+
+    // ── COOKIES ──────────────────────────────────────────────────────────────
     {
-      id: 'brownie', name: 'Fudge Brownie', description: 'House-baked, rich chocolate fudge brownie', price: 500, category: 'Desserts',
-      image: '🍫', available: true, popular: false, allergens: ['gluten', 'dairy', 'eggs'], prepTime: 1, calories: 380,
-      modifiers: []
-    },
-    {
-      id: 'churro', name: 'Churro Bites', description: 'Crispy fried dough, cinnamon sugar, chocolate dipping sauce', price: 550, category: 'Desserts',
-      image: '🥐', available: true, popular: true, allergens: ['gluten', 'dairy', 'eggs'], prepTime: 4, calories: 340,
-      modifiers: []
+      id: 'cookies',
+      name: 'Baked Cookies',
+      description: "Ara's freshly baked cookies — soft, chewy, and homemade. Ask about today's flavors.",
+      price: 499,
+      category: 'Baked Goods',
+      image: '🍪',
+      available: true,
+      popular: false,
+      allergens: ['gluten', 'dairy', 'eggs'],
+      prepTime: 1,
+      calories: 220,
+      modifiers: [
+        {
+          name: 'Flavor',
+          required: true,
+          multiple: false,
+          options: [
+            { name: 'Chocolate Chip', price: 0 },
+            { name: 'Snickerdoodle', price: 0 },
+            { name: 'Oatmeal Raisin', price: 0 },
+            { name: "Ask Today's Special", price: 0 },
+          ]
+        }
+      ]
     },
   ]
 }
@@ -458,21 +762,30 @@ app.patch('/api/admin/settings', async (c) => {
 
 // Admin — Seed demo orders
 app.post('/api/admin/seed', (c) => {
-  const names = ['Alex', 'Jordan', 'Sam', 'Casey', 'Riley', 'Morgan', 'Drew']
+  const names = ['Alex', 'Jordan', 'Sam', 'Casey', 'Riley', 'Morgan', 'Drew', 'Jamie']
   const statuses: OrderStatus[] = ['paid', 'queued', 'in_prep', 'ready', 'completed']
+  const combos = [
+    [{ id: 'hotdog-classic', mod: '1 Dog – $5.00' }, { id: 'island-ice', mod: 'Regular 9 oz – $6.50' }],
+    [{ id: 'chilidog', mod: '1 Chili Dog – $6.00' }, { id: 'lemonade', mod: 'Small – $4.50' }],
+    [{ id: 'hotdog-jumbo', mod: '' }, { id: 'ice-cream', mod: 'Regular 8 oz – $7.50' }],
+    [{ id: 'beef-sausage', mod: '1 Sausage – $7.00' }, { id: 'sorbet', mod: 'Regular 9 oz – $6.50' }],
+    [{ id: 'chilidog', mod: '2 Chili Dogs – $10.50 (save $1.50)' }, { id: 'soda', mod: 'Coca-Cola' }],
+    [{ id: 'ice-cream', mod: 'Kids 4 oz – $5.50' }, { id: 'cookies', mod: 'Chocolate Chip' }],
+    [{ id: 'lemonade', mod: 'Large – $10.00' }, { id: 'island-ice', mod: 'Large 12 oz – $9.75' }],
+    [{ id: 'hotdog-classic', mod: '2 Dogs – $8.00 (save $2)' }, { id: 'lemonade', mod: 'Medium – $7.00' }],
+  ]
   for (let i = 0; i < 8; i++) {
-    const item1 = menuItems[Math.floor(Math.random() * 4)]
-    const item2 = menuItems[4 + Math.floor(Math.random() * 4)]
-    const items: OrderItem[] = [
-      { id: item1.id, name: item1.name, price: item1.price, quantity: 1, modifiers: [], notes: '' },
-      { id: item2.id, name: item2.name, price: item2.price, quantity: 1, modifiers: [], notes: '' },
-    ]
+    const combo = combos[i]
+    const items: OrderItem[] = combo.map(c => {
+      const m = menuItems.find(mi => mi.id === c.id)!
+      return { id: m.id, name: m.name, price: m.price, quantity: 1, modifiers: c.mod ? [c.mod] : [], notes: '' }
+    })
     const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
     const status = statuses[Math.floor(Math.random() * statuses.length)]
     orders.unshift({
       id: uid(),
       ticketNumber: ++orderSeq,
-      customerName: names[Math.floor(Math.random() * names.length)],
+      customerName: names[i % names.length],
       channel: 'kiosk',
       items,
       subtotal, tax, total,
