@@ -11,7 +11,7 @@ const settings: AppSettings = {
   taxRate: 0.08,
   stripeMode: false,
   stripePublishableKey: '',
-  operatingHours: 'Call 813-522-3553',
+  operatingHours: 'Call 727-254-7198',
   tagline: 'Hand-Crafted Ice Cream · Island Ice · Hot Dogs',
 }
 
@@ -452,6 +452,32 @@ function getDefaultMenu(): MenuItem[] {
             { name: 'Snickerdoodle', price: 0 },
             { name: 'Oatmeal Raisin', price: 0 },
             { name: "Ask Today's Special", price: 0 },
+          ]
+        }
+      ]
+    },
+
+    // ── BROWNIES ─────────────────────────────────────────────────────────────
+    {
+      id: 'brownie',
+      name: 'Fudge Brownie',
+      description: "Ara's rich, fudgy homemade brownies — dense chocolate goodness baked fresh.",
+      price: 499,
+      category: 'Baked Goods',
+      image: '🍫',
+      available: true,
+      popular: true,
+      allergens: ['gluten', 'dairy', 'eggs'],
+      prepTime: 1,
+      calories: 380,
+      modifiers: [
+        {
+          name: 'Add-On',
+          required: false,
+          multiple: false,
+          options: [
+            { name: 'Plain', price: 0 },
+            { name: 'Warm with Ice Cream Scoop +$3.00', price: 300 },
           ]
         }
       ]
