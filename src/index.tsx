@@ -9,9 +9,15 @@ const menuItems: MenuItem[] = getDefaultMenu()
 const settings: AppSettings = {
   businessName: "Ara's DNA",
   taxRate: 0.08,
+  // Stripe (for Tap to Pay later)
   stripeMode: false,
   stripePublishableKey: '',
-  operatingHours: 'Call 727-254-7198',
+  // Square (online card entry — use now)
+  squareMode: false,
+  squareAppId: '',
+  squareLocationId: '',
+  // General
+  operatingHours: 'Call 813-522-3553',
   tagline: 'Hand-Crafted Ice Cream · Island Ice · Hot Dogs',
 }
 
@@ -72,8 +78,14 @@ interface ModifierGroup {
 interface AppSettings {
   businessName: string
   taxRate: number
+  // Stripe
   stripeMode: boolean
   stripePublishableKey: string
+  // Square
+  squareMode: boolean
+  squareAppId: string
+  squareLocationId: string
+  // General
   operatingHours: string
   tagline: string
 }
@@ -640,7 +652,6 @@ app.post('/api/payments/create-intent', async (c) => {
 })
 
 app.post('/api/webhooks/stripe', async (c) => {
-  // In production: verify Stripe-Signature header
   const body = await c.req.json()
   const { type, data } = body
   if (type === 'payment_intent.succeeded') {
@@ -653,6 +664,145 @@ app.post('/api/webhooks/stripe', async (c) => {
     }
   }
   return c.json({ received: true })
+})
+
+// ══════════════════════════════════════════════════════════════════
+// STRIPE ONLINE (card-not-present / screen entry)
+// ══════════════════════════════════════════════════════════════════
+app.post('/api/payments/stripe-online', async (c) => {
+  const STRIPE_KEY = (c.env as any)?.STRIPE_SECRET_KEY || ''
+  if (!STRIPE_KEY) return c.json({ error: 'Stripe not configured' }, 400)
+  const body = await c.req.json()
+  const { customerName = 'Guest', items: rawItems = [], notes = '' } = body
+
+  const items: OrderItem[] = rawItems.map((ri: any) => {
+    const m = menuItems.find(m => m.id === ri.id)
+    if (!m) throw new Error(`Unknown item ${ri.id}`)
+    return { id: m.id, name: m.name, price: m.price, quantity: ri.quantity || 1, modifiers: ri.modifiers || [], notes: ri.notes || '' }
+  })
+  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
+
+  // Create a PaymentIntent for online card entry
+  const params = new URLSearchParams({
+    amount: String(total),
+    currency: 'usd',
+    'payment_method_types[]': 'card',
+    'metadata[customerName]': customerName,
+    'metadata[source]': 'kiosk_online',
+  })
+  const res = await fetch('https://api.stripe.com/v1/payment_intents', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${STRIPE_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString(),
+  })
+  const data: any = await res.json()
+  if (!res.ok) return c.json({ error: data.error?.message }, 400)
+
+  // Pre-create the order (confirmed when webhook fires)
+  const order: Order = {
+    id: uid(), ticketNumber: ++orderSeq, customerName, channel: 'kiosk',
+    items, subtotal, tax, total,
+    status: 'paid', paymentMethod: 'stripe_online',
+    paymentIntentId: data.id,
+    createdAt: now(), updatedAt: now(),
+    statusHistory: [{ status: 'paid', at: now() }],
+    notes, priority: false,
+  }
+  orders.unshift(order)
+  return c.json({ clientSecret: data.client_secret, orderId: order.id, total, publishableKey: settings.stripePublishableKey })
+})
+
+// ══════════════════════════════════════════════════════════════════
+// SQUARE ONLINE (Web Payments SDK — card entry on screen)
+// ══════════════════════════════════════════════════════════════════
+
+// Step 1: Client requests payment token info
+app.post('/api/payments/square-init', async (c) => {
+  if (!settings.squareMode || !settings.squareAppId || !settings.squareLocationId) {
+    return c.json({ error: 'Square not configured' }, 400)
+  }
+  const body = await c.req.json()
+  const { items: rawItems = [] } = body
+  const items: OrderItem[] = rawItems.map((ri: any) => {
+    const m = menuItems.find(m => m.id === ri.id)
+    if (!m) throw new Error(`Unknown item ${ri.id}`)
+    return { id: m.id, name: m.name, price: m.price, quantity: ri.quantity || 1, modifiers: ri.modifiers || [], notes: ri.notes || '' }
+  })
+  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
+  // Return config needed by Square Web Payments SDK on the frontend
+  return c.json({
+    appId: settings.squareAppId,
+    locationId: settings.squareLocationId,
+    total,
+    subtotal,
+    tax,
+  })
+})
+
+// Step 2: Client tokenized the card — server creates the Square payment
+app.post('/api/payments/square-charge', async (c) => {
+  const SQUARE_TOKEN = (c.env as any)?.SQUARE_ACCESS_TOKEN || ''
+  if (!SQUARE_TOKEN) return c.json({ error: 'Square access token not configured on server' }, 400)
+  const body = await c.req.json()
+  const { sourceId, customerName = 'Guest', items: rawItems = [], notes = '' } = body
+
+  const items: OrderItem[] = rawItems.map((ri: any) => {
+    const m = menuItems.find(m => m.id === ri.id)
+    if (!m) throw new Error(`Unknown item ${ri.id}`)
+    return { id: m.id, name: m.name, price: m.price, quantity: ri.quantity || 1, modifiers: ri.modifiers || [], notes: ri.notes || '' }
+  })
+  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
+
+  // Call Square Payments API
+  const idempotencyKey = uid() + '-' + Date.now()
+  const squareRes = await fetch('https://connect.squareup.com/v2/payments', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${SQUARE_TOKEN}`,
+      'Content-Type': 'application/json',
+      'Square-Version': '2024-01-18',
+    },
+    body: JSON.stringify({
+      idempotency_key: idempotencyKey,
+      source_id: sourceId,
+      amount_money: { amount: total, currency: 'USD' },
+      location_id: settings.squareLocationId,
+      note: `Ara's DNA Kiosk — ${customerName}`,
+    }),
+  })
+  const squareData: any = await squareRes.json()
+  if (!squareRes.ok || squareData.errors) {
+    const msg = squareData.errors?.[0]?.detail || 'Square payment failed'
+    return c.json({ error: msg }, 400)
+  }
+
+  const squarePaymentId = squareData.payment?.id
+  const order: Order = {
+    id: uid(), ticketNumber: ++orderSeq, customerName, channel: 'kiosk',
+    items, subtotal, tax, total,
+    status: 'paid', paymentMethod: 'square_online',
+    paymentIntentId: squarePaymentId,
+    createdAt: now(), updatedAt: now(),
+    statusHistory: [{ status: 'paid', at: now() }],
+    notes, priority: false,
+  }
+  orders.unshift(order)
+  return c.json({ order, squarePaymentId })
+})
+
+// Square webhook (payment.completed events)
+app.post('/api/webhooks/square', async (c) => {
+  const body = await c.req.json()
+  if (body.type === 'payment.completed') {
+    const sqId = body.data?.object?.payment?.id
+    const order = orders.find(o => o.paymentIntentId === sqId)
+    if (order) {
+      order.status = 'queued'
+      order.updatedAt = now()
+      order.statusHistory.push({ status: 'queued', at: now() })
+    }
+  }
+  return c.json({ ok: true })
 })
 
 // ══════════════════════════════════════════════════════════════════
@@ -848,9 +998,11 @@ function kioskHTML() {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-  <title>Food Trailer Kiosk</title>
+  <title>Ara's DNA Kiosk</title>
   <script src="/static/tailwind.min.js"></script>
-  <script src="https://js.stripe.com/terminal/v1/"></script>
+  <script src="https://js.stripe.com/v3/" defer></script>
+  <script src="https://js.stripe.com/terminal/v1/" defer></script>
+  <script src="https://sandbox.web.squarecdn.com/v1/square.js" defer></script>
   <link rel="stylesheet" href="/static/fa.min.css"/>
   <link rel="stylesheet" href="/static/kiosk.css"/>
 </head>
