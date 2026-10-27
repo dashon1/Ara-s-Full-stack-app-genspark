@@ -110,3 +110,8 @@ footer a:hover { color: #fff; }
   .hero::after { background: linear-gradient(0deg, var(--bg) 0%, rgba(3,7,18,.7) 60%, rgba(3,7,18,.7) 100%); }
   .hero-cta .btn { flex: 1 1 100%; }
 }
+
+/* Always-visible admin link */
+.nav a.nav-admin{border:1px solid var(--border);border-radius:99px;padding:7px 14px;color:#fff;font-size:14px}
+.nav a.nav-admin:hover{border-color:var(--brand)}
+@media(max-width:640px){.nav a.nav-admin{display:inline-flex!important;padding:8px 12px}}

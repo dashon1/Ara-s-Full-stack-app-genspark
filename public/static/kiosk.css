@@ -273,3 +273,6 @@ fieldset.modifier-group { border: 0; margin-bottom: 20px; min-width: 0; }
   .modal-footer { bottom: -22px; }
   .toast { top: 70px; }
 }
+
+.header-right a[href="/admin"]{color:#fff;border:1px solid var(--border);border-radius:99px;padding:8px 14px}
+.header-right a[href="/admin"]:hover{border-color:var(--brand)}

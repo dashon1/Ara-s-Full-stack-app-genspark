@@ -11,6 +11,7 @@ document.getElementById('app').innerHTML = `
       <a href="#menu">Menu</a>
       <a href="#videos">Videos</a>
       <a href="#visit">Visit</a>
+      <a class="nav-admin" href="/admin"><i class="fas fa-lock" aria-hidden="true"></i> Admin</a>
       <a class="btn btn-primary" href="/kiosk"><i class="fas fa-bag-shopping" aria-hidden="true"></i> Order now</a>
     </nav>
   </div>
@@ -72,7 +73,7 @@ document.getElementById('app').innerHTML = `
 <footer>
   <div class="wrap">
     <span>&copy; <span id="year"></span> <span id="footName">Ara's DNA</span></span>
-    <span><a href="/kiosk">Kiosk</a><a href="/kds">Kitchen</a><a href="/admin">Staff</a></span>
+    <span><a href="/kiosk">Kiosk</a><a href="/kds">Kitchen</a><a href="/admin">Admin</a></span>
   </div>
 </footer>
 
