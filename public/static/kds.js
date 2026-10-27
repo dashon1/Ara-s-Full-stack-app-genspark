@@ -1,3 +1,4 @@
+function escH(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 // ─── State ───────────────────────────────────────────────────────────────────
 const state = {
   orders: [],
@@ -168,7 +169,7 @@ function renderTicket(o, actions) {
       <div class="ticket-top">
         <div>
           <div class="ticket-num"><span>#</span>${o.ticketNumber}</div>
-          <div class="ticket-name">${o.customerName || 'Guest'}</div>
+          <div class="ticket-name">${escH(o.customerName || 'Guest')}</div>
           <span class="ticket-channel">${o.channel}</span>
         </div>
         <div class="ticket-meta">
@@ -183,7 +184,7 @@ function renderTicket(o, actions) {
             <div><span class="qty">${i.quantity}x</span>${i.name}${i.modifiers?.length ? `<div class="mods">${i.modifiers.join(', ')}</div>` : ''}</div>
           </div>
         `).join('')}
-        ${o.notes ? `<div style="margin-top:6px;font-size:11px;color:#f97316;font-style:italic"><i class="fas fa-sticky-note"></i> ${o.notes}</div>` : ''}
+        ${o.notes ? `<div style="margin-top:6px;font-size:11px;color:#f97316;font-style:italic"><i class="fas fa-sticky-note"></i> ${escH(o.notes)}</div>` : ''}
       </div>
       <div class="ticket-actions">
         ${actions.map(a => `<button class="tick-btn ${a.cls}" onclick="handleTicketAction('${o.id}','${a.cls}')">${a.label}</button>`).join('')}

@@ -160,3 +160,28 @@ input:checked + .slider::before { transform: translateX(18px); }
   :root { --sidebar-w: 200px; }
   .stats-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ===== Videos page ===== */
+.notice{background:var(--surface2);border:1px solid var(--border);border-left:4px solid var(--brand);border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:14px;line-height:1.5;color:var(--muted)}
+.notice.warn{border-left-color:#f59e0b}
+.notice code,.card code{background:var(--surface3);padding:1px 6px;border-radius:5px;font-size:12.5px}
+.dropzone{border:2px dashed var(--border);border-radius:14px;padding:32px 16px;text-align:center;cursor:pointer;background:var(--surface2);transition:border-color .15s,background .15s;color:var(--muted)}
+.dropzone:hover,.dropzone:focus-visible,.dropzone.over{border-color:var(--brand);background:var(--surface3);outline:none}
+.dropzone.disabled{opacity:.5;cursor:not-allowed}
+.dropzone i{font-size:30px;display:block;margin-bottom:8px;color:var(--brand)}
+#uploadQueue{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.upload-row{display:grid;grid-template-columns:minmax(0,1fr) 140px 48px;gap:10px;align-items:center;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:13px}
+.u-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.u-bar{height:8px;background:var(--surface3);border-radius:99px;overflow:hidden}
+.u-fill{display:block;height:100%;width:0;background:var(--brand);transition:width .2s}
+.u-pct{text-align:right;color:var(--muted)}
+.upload-row.ok .u-fill{background:#22c55e}.upload-row.ok .u-pct{color:#22c55e}
+.upload-row.err .u-fill{background:#ef4444}.upload-row.err .u-pct{color:#ef4444}
+.video-row{display:flex;gap:14px;align-items:center;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--surface2);margin-bottom:10px}
+.video-row video{width:150px;height:90px;object-fit:cover;border-radius:8px;background:#000;flex:none}
+.video-meta{flex:1;min-width:0}
+.video-title{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.video-sub{font-size:12.5px;color:var(--muted);margin-top:3px}
+.video-actions{display:flex;gap:6px;flex-wrap:wrap}
+.empty-state{text-align:center;padding:36px 16px;color:var(--muted)}
+@media(max-width:640px){.video-row{flex-direction:column;align-items:stretch}.video-row video{width:100%;height:170px}.upload-row{grid-template-columns:1fr 70px 40px}}
