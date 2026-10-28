@@ -609,6 +609,22 @@ updateClock()
 // ─── Auto-refresh dashboard ───────────────────────────────────────────────────
 setInterval(() => { if (state.page === 'dashboard') loadDashboard() }, 8000)
 
+// Orders page: pick up new orders on its own, but never re-draw while a
+// status menu / search box is being used (that would close the dropdown).
+setInterval(async () => {
+  if (state.page !== 'orders' || document.hidden) return
+  const a = document.activeElement
+  if (a && (a.tagName === 'SELECT' || a.tagName === 'INPUT')) return
+  try {
+    const res = await fetch('/api/admin/orders')
+    if (!res.ok) return
+    const data = await res.json()
+    const next = data.orders || []
+    const sig = (l) => l.map(o => o.id + o.status + (o.priority ? 'p' : '')).join('|')
+    if (sig(next) !== sig(state.orders)) { state.orders = next; renderOrdersTable() }
+  } catch {}
+}, 5000)
+
 // ─── Mount HTML ───────────────────────────────────────────────────────────────
 document.getElementById('app').innerHTML = `
   <div class="sidebar">
