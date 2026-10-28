@@ -82,4 +82,9 @@ Then: Admin → Settings → enter Square/Stripe public keys, confirm Test mode 
 - Video compression/thumbnails.
 
 ## Status
-Not deployed. Hono + TypeScript on Cloudflare Pages with D1 and R2.
+- **Live (Genspark-hosted):** https://72bc1bcb-39c9-4e96-8f2c-b03656a66302.vip.gensparksite.com
+- GitHub: https://github.com/dashon1/Ara-s-Full-stack-app-genspark
+- Storage on the live site: D1 (orders/settings/menu) and R2 (videos) — both persistent.
+- `ADMIN_PIN` is set as a secret on the live worker. After any redeploy, check `gsk hosted secret_list` and re-set it if missing.
+- Still to add on live: card processor keys (Admin → Settings plus `STRIPE_SECRET_KEY` / `SQUARE_ACCESS_TOKEN` secret).
+- Stack: Hono + TypeScript on Cloudflare Workers, D1, R2.
