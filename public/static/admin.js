@@ -67,6 +67,8 @@ window.navigate = function(page) {
   })
   const titles = { dashboard: 'Dashboard', orders: 'Orders', menu: 'Menu Management', videos: 'Videos', analytics: 'Analytics', settings: 'Settings' }
   qs('pageTitle').textContent = titles[page] || page
+  qs('backBtn').hidden = page === 'dashboard'
+  window.scrollTo(0, 0)
   if (page === 'dashboard') loadDashboard()
   if (page === 'orders') loadOrders()
   if (page === 'menu') loadMenu()
@@ -638,6 +640,7 @@ document.getElementById('app').innerHTML = `
     <div class="main-header">
       <div class="page-title" id="pageTitle">Dashboard</div>
       <div class="header-actions">
+        <button class="btn btn-secondary" id="backBtn" onclick="navigate('dashboard')" hidden><i class="fas fa-arrow-left"></i> Dashboard</button>
         <span class="header-time" id="headerTime"></span>
         <button class="btn btn-secondary" onclick="seedOrders()"><i class="fas fa-database"></i> Seed Demo</button>
         <button class="btn btn-primary" onclick="navigate('orders')"><i class="fas fa-list"></i> All Orders</button>
@@ -735,7 +738,7 @@ document.getElementById('app').innerHTML = `
       <div id="page-videos" class="page-section">
         <div id="videoNotice" class="notice" hidden></div>
         <div class="card">
-          <div class="card-title"><span><i class="fas fa-cloud-arrow-up" style="color:#f97316"></i> Upload videos</span></div>
+          <div class="card-title"><span><i class="fas fa-upload" style="color:#f97316"></i> Upload videos</span></div>
           <label class="dropzone" id="dropzone" for="videoFile">
             <i class="fas fa-film"></i>
             <strong>Drag &amp; drop videos here, or click to choose</strong>
