@@ -129,6 +129,9 @@ function renderKDS() {
   qs('statPrep').textContent = inPrep.length
   qs('statReady').textContent = ready.length
   qs('statTotal').textContent = state.orders.length
+  qs('queuedCount').textContent = queued.length
+  qs('prepCount').textContent = inPrep.length
+  qs('readyCount').textContent = ready.length
 
   // Render columns
   renderColumn('queuedCol', queued, [
@@ -181,7 +184,7 @@ function renderTicket(o, actions) {
       <div class="ticket-items">
         ${o.items.map(i => `
           <div class="ticket-item">
-            <div><span class="qty">${i.quantity}x</span>${i.name}${i.modifiers?.length ? `<div class="mods">${i.modifiers.join(', ')}</div>` : ''}</div>
+            <div><span class="qty">${i.quantity}x</span>${escH(i.name)}${i.modifiers?.length ? `<div class="mods">${escH(i.modifiers.join(', '))}</div>` : ''}</div>
           </div>
         `).join('')}
         ${o.notes ? `<div style="margin-top:6px;font-size:11px;color:#f97316;font-style:italic"><i class="fas fa-sticky-note"></i> ${escH(o.notes)}</div>` : ''}

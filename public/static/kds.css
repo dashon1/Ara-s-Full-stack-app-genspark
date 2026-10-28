@@ -37,7 +37,7 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #030712; colo
 .col-header { 
   padding: 12px 16px; font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 1.5px;
   border-bottom: 2px solid var(--border); display: flex; align-items: center; justify-content: space-between;
-  position: sticky; top: 64px; z-index: 50; background: #030712;
+  background: #030712; flex: none;
 }
 .col-header.queued { border-bottom-color: #fbbf24; color: #fbbf24; }
 .col-header.in-prep { border-bottom-color: #3b82f6; color: #3b82f6; }
@@ -123,3 +123,10 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #030712; colo
 .sound-btn { background: none; border: 1px solid var(--border); border-radius: 6px; color: #6b7280; padding: 6px 10px; cursor: pointer; font-size: 13px; }
 .sound-btn:hover { color: white; border-color: #6b7280; }
 .sound-btn.on { color: #22c55e; border-color: #22c55e; }
+
+/* Layout fix: columns scroll internally, headers never cover tickets */
+.kds-body{min-height:0}
+.kds-col{min-height:0}
+.col-tickets{min-height:0;align-content:flex-start}
+.tick-btn.priority-btn{min-width:44px;font-size:16px}
+@media(max-width:800px){.kds-body{flex-direction:column;overflow-y:auto}.kds-col{flex:none;border-right:0;border-bottom:1px solid var(--border)}}
