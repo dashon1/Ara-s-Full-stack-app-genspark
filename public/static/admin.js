@@ -228,7 +228,12 @@ window.togglePriority = async function(id) {
 }
 
 window.seedOrders = async function() {
-  await fetch('/api/admin/seed', { method: 'POST' })
+  const r = await fetch('/api/admin/seed', { method: 'POST' })
+  if (!r.ok) {
+    let m = 'Could not add demo orders'
+    try { m = (await r.json()).error || m } catch {}
+    toast(m, 'error'); return
+  }
   toast('8 demo orders added!')
   loadDashboard()
 }
@@ -456,6 +461,10 @@ async function loadSettings() {
   qs('settSquareLocationId').value = s.squareLocationId || ''
   qs('settAttractMode').checked = s.attractMode !== false
   qs('settAttractIdle').value = s.attractIdleSeconds || 60
+  qs('settOrdersOpen').checked = s.ordersOpen !== false
+  qs('settClosedMsg').value = s.closedMessage || ''
+  qs('settPickupInstr').value = s.pickupInstructions || ''
+  qs('settAllowDemo').checked = !!s.allowDemoOrders
 }
 
 window.saveSettings = async function() {
@@ -472,6 +481,10 @@ window.saveSettings = async function() {
     squareLocationId: qs('settSquareLocationId').value.trim(),
     attractMode: qs('settAttractMode').checked,
     attractIdleSeconds: parseInt(qs('settAttractIdle').value, 10) || 60,
+    ordersOpen: qs('settOrdersOpen').checked,
+    closedMessage: qs('settClosedMsg').value.trim(),
+    pickupInstructions: qs('settPickupInstr').value.trim(),
+    allowDemoOrders: qs('settAllowDemo').checked,
   }
   if (!(body.taxRate >= 0)) { toast('Enter a valid tax rate', 'error'); return }
   const res = await fetch('/api/admin/settings', {
@@ -838,6 +851,27 @@ document.getElementById('app').innerHTML = `
           <div class="form-group">
             <label class="form-label">Phone (shown on the website)</label>
             <input type="tel" id="settPhone" class="form-input" placeholder="813-522-3553">
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h3><i class="fas fa-store" style="color:#22c55e"></i> Self-serve ordering</h3>
+          <p style="font-size:13px;color:#9ca3af;margin-bottom:16px">Customers order and pay by card on the kiosk or at <code>/order</code>, then watch their ticket on <code>/pickup</code>. Turn ordering off when you are sold out or closing.</p>
+          <div class="form-group" style="display:flex;align-items:center;gap:12px">
+            <label class="toggle-sw"><input type="checkbox" id="settOrdersOpen" aria-label="Taking orders"><span class="slider"></span></label>
+            <span style="font-size:14px">Taking orders</span>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Message when ordering is paused</label>
+            <input type="text" id="settClosedMsg" class="form-input" maxlength="160" placeholder="We're not taking orders right now. Please check back soon!">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Pickup instructions (shown after payment)</label>
+            <input type="text" id="settPickupInstr" class="form-input" maxlength="200" placeholder="Watch the pickup screen. We'll call your name when it's ready.">
+          </div>
+          <div class="form-group" style="display:flex;align-items:center;gap:12px">
+            <label class="toggle-sw"><input type="checkbox" id="settAllowDemo" aria-label="Test mode"><span class="slider"></span></label>
+            <span style="font-size:14px"><strong>Test mode</strong> — allow orders without a card (never leave on when open to the public)</span>
           </div>
         </div>
 

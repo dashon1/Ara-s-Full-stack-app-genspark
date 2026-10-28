@@ -8,8 +8,9 @@ const state = {
   stripeMode: false, stripePublishableKey: '',
   squarePayments: null, squareCard: null,
   videos: [], lastActivity: Date.now(), attractOn: false, attractIdx: 0,
-  confirmTimer: null,
+  confirmTimer: null, trackTimer: null, payKey: '',
 }
+const MODE = document.body.dataset.mode === 'online' ? 'online' : 'kiosk'   // kiosk = on-site touchscreen, online = phone/web
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const fmt = (cents) => `$${(cents / 100).toFixed(2)}`
@@ -261,12 +262,15 @@ async function openPaymentModal() {
   const { sub, tax, total } = cartTotal()
   const hasSquare = state.squareMode && state.squareAppId
   const hasStripe = state.stripeMode && state.stripePublishableKey
+  const allowDemo = !!state.settings.allowDemoOrders
 
   const tabs = [
-    `<button class="pay-tab active" data-method="demo"><i class="fas fa-money-bill-wave" aria-hidden="true"></i> Cash / Demo</button>`,
-    hasSquare ? `<button class="pay-tab" data-method="square"><i class="fas fa-credit-card" aria-hidden="true"></i> Card (Square)</button>` : '',
-    hasStripe ? `<button class="pay-tab" data-method="stripe"><i class="fas fa-credit-card" aria-hidden="true"></i> Card (Stripe)</button>` : '',
+    hasSquare ? `<button class="pay-tab ${hasSquare ? 'active' : ''}" data-method="square"><i class="fas fa-credit-card" aria-hidden="true"></i> Card</button>` : '',
+    hasStripe ? `<button class="pay-tab ${!hasSquare ? 'active' : ''}" data-method="stripe"><i class="fas fa-credit-card" aria-hidden="true"></i> ${hasSquare ? 'Card (Stripe)' : 'Card'}</button>` : '',
+    allowDemo ? `<button class="pay-tab" data-method="demo"><i class="fas fa-flask" aria-hidden="true"></i> Test order</button>` : '',
   ].join('')
+  const firstMethod = hasSquare ? 'square' : hasStripe ? 'stripe' : allowDemo ? 'demo' : ''
+  state.payKey = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()).slice(0, 40)
 
   qs('payModalContent').innerHTML = `
     <div class="pay-total">
@@ -274,13 +278,14 @@ async function openPaymentModal() {
       <div class="amt">${fmt(total)}</div>
       <div class="brk">${fmt(sub)} + ${fmt(tax)} tax</div>
     </div>
-    ${(hasSquare || hasStripe) ? `<div class="pay-tabs" role="tablist" aria-label="Payment method">${tabs}</div>` : ''}
-    <div id="panel-demo" class="pay-panel active">
-      <div class="pay-note"><i class="fas fa-receipt" aria-hidden="true"></i>
-        <p>Pay <strong>cash at the window</strong>, or use this for testing.</p>
-        <p class="sm">Your order goes straight to the kitchen.</p></div>
-      <button class="pay-submit-btn demo" id="demoPayBtn" data-action="pay-demo"><i class="fas fa-check-circle" aria-hidden="true"></i> Place order</button>
-    </div>
+    ${!firstMethod ? `<div class="pay-error" role="alert"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i> Card payments aren’t available right now. Please try again in a little while.</div>` : ''}
+    ${(hasSquare + hasStripe + allowDemo) > 1 ? `<div class="pay-tabs" role="tablist" aria-label="Payment method">${tabs}</div>` : ''}
+    ${allowDemo ? `<div id="panel-demo" class="pay-panel">
+      <div class="pay-note"><i class="fas fa-flask" aria-hidden="true"></i>
+        <p><strong>Test mode.</strong> No card is charged.</p>
+        <p class="sm">Turn Test mode off in Admin → Settings before going live.</p></div>
+      <button class="pay-submit-btn demo" id="demoPayBtn" data-action="pay-demo"><i class="fas fa-check-circle" aria-hidden="true"></i> Place test order</button>
+    </div>` : ''}
     ${hasSquare ? `<div id="panel-square" class="pay-panel">
       <div class="secure"><i class="fas fa-lock" aria-hidden="true"></i> Secure card entry by Square</div>
       <div id="square-card-container" class="card-box"><div class="card-loading"><i class="fas fa-spinner fa-spin" aria-hidden="true"></i> Loading secure form…</div></div>
@@ -294,8 +299,13 @@ async function openPaymentModal() {
       <button class="pay-submit-btn stripe" id="stripePayBtn" data-action="pay-stripe"><i class="fas fa-lock" aria-hidden="true"></i> Pay ${fmt(total)}</button>
     </div>` : ''}`
 
+  if (firstMethod) {
+    document.querySelectorAll('.pay-panel').forEach((p) => p.classList.toggle('active', p.id === 'panel-' + firstMethod))
+  }
   qs('payModal').classList.remove('hidden')
   qs('payModal').querySelector('.modal-close').focus()
+  if (firstMethod === 'square') mountSquareCard()
+  else if (firstMethod === 'stripe') mountStripeElements()
 }
 
 function closePayModal() { qs('payModal').classList.add('hidden') }
@@ -330,7 +340,7 @@ async function mountSquareCard() {
   } catch (e) {
     console.warn('Square mount failed:', e.message)
     state.squareCard = null
-    box.innerHTML = `<div class="pay-error"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i> Card form unavailable. Check the Square App ID &amp; Location ID in Admin → Settings, or pay cash.</div>`
+    box.innerHTML = `<div class="pay-error"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i> Card form unavailable. Check the Square App ID &amp; Location ID in Admin → Settings.</div>`
   }
 }
 
@@ -352,13 +362,14 @@ async function mountStripeElements() {
   } catch (e) {
     console.warn('Stripe mount failed:', e.message)
     stripeCardElement = null
-    box.innerHTML = `<div class="pay-error"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i> Card form unavailable. Check the Stripe key in Admin → Settings, or pay cash.</div>`
+    box.innerHTML = `<div class="pay-error"><i class="fas fa-triangle-exclamation" aria-hidden="true"></i> Card form unavailable. Check the Stripe key in Admin → Settings.</div>`
   }
 }
 
 // ─── Submit helpers ───────────────────────────────────────────────────────────
 function cartPayload() {
   return {
+    channel: MODE,
     customerName: qs('customerName').value.trim() || 'Guest',
     items: Object.values(state.cart).map((e) => ({ id: e.item.id, quantity: e.quantity, modifiers: e.modifiers })),
   }
@@ -366,7 +377,7 @@ function cartPayload() {
 async function postJSON(url, body) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   const data = await res.json().catch(() => ({}))
-  if (!res.ok) throw new Error(data.error || 'Something went wrong. Please try again.')
+  if (!res.ok) { if (data.closed) refreshMenu(); throw new Error(data.error || 'Something went wrong. Please try again.') }
   return data
 }
 function busy(btn, label) { btn.disabled = true; btn.dataset.label = btn.innerHTML; btn.innerHTML = `<i class="fas fa-spinner fa-spin" aria-hidden="true"></i> ${label}` }
@@ -376,7 +387,7 @@ function showPayError(id, msg) { const el = qs(id); if (el) { el.textContent = m
 async function payDemo() {
   const btn = qs('demoPayBtn'); busy(btn, 'Placing order…')
   try {
-    const data = await postJSON('/api/orders', { ...cartPayload(), channel: 'kiosk' })
+    const data = await postJSON('/api/orders', cartPayload())
     finishOrder(data.order)
   } catch (err) { unbusy(btn); toast(err.message, '#ef4444') }
 }
@@ -387,7 +398,7 @@ async function paySquare() {
   try {
     const r = await state.squareCard.tokenize()
     if (r.status !== 'OK') throw new Error(r.errors?.[0]?.message || 'Please check your card details.')
-    const data = await postJSON('/api/payments/square-charge', { ...cartPayload(), sourceId: r.token })
+    const data = await postJSON('/api/payments/square-charge', { ...cartPayload(), sourceId: r.token, idempotencyKey: state.payKey })
     finishOrder(data.order)
   } catch (err) { unbusy(btn); showPayError('squareError', err.message) }
 }
@@ -403,8 +414,8 @@ async function payStripe() {
     })
     if (error) throw new Error(error.message)
     if (paymentIntent.status !== 'succeeded') throw new Error('Payment was not completed.')
-    const order = await (await fetch('/api/orders/' + intent.orderId)).json()
-    finishOrder(order)
+    const done = await postJSON('/api/payments/stripe-confirm', { orderId: intent.orderId })
+    finishOrder(done.order)
   } catch (err) { unbusy(btn); showPayError('stripeError', err.message) }
 }
 
@@ -414,20 +425,86 @@ function finishOrder(order) {
   showConfirmation(order)
 }
 
-// ─── Confirmation ─────────────────────────────────────────────────────────────
+// ─── Confirmation + live order tracking ───────────────────────────────────────
+const STEPS = [['paid', 'Received', 'fa-receipt'], ['in_prep', 'Making it', 'fa-fire'], ['ready', 'Ready!', 'fa-bell-concierge']]
+function stepIndex(status) { return status === 'ready' || status === 'completed' ? 2 : status === 'in_prep' ? 1 : 0 }
+
+function renderTracker(o) {
+  const idx = stepIndex(o.status)
+  qs('confirmSteps').innerHTML = STEPS.map((st, i) =>
+    `<li class="${i < idx ? 'done' : i === idx ? 'now' : ''}"><i class="fas ${st[2]}" aria-hidden="true"></i><span>${st[1]}</span></li>`).join('')
+  const msg = qs('confirmMsg')
+  if (o.status === 'refunded' || o.status === 'cancelled') {
+    msg.className = 'confirm-msg warn'; msg.textContent = 'This order was cancelled. If you were charged, you will be refunded.'
+  } else if (o.status === 'ready') {
+    msg.className = 'confirm-msg ready'
+    msg.innerHTML = `<strong>Your order is ready!</strong> ${esc(o.pickupInstructions || '')}`
+    if (!state.readyShown) { state.readyShown = true; try { navigator.vibrate && navigator.vibrate([200, 100, 200]) } catch {} }
+  } else if (o.status === 'completed') {
+    msg.className = 'confirm-msg'; msg.textContent = 'Picked up — enjoy! 🍦'
+  } else {
+    msg.className = 'confirm-msg'
+    msg.textContent = o.ahead > 0 ? `${o.ahead} order${o.ahead === 1 ? '' : 's'} ahead of you. Watch for #${o.ticketNumber} on the pickup board.` : `You’re up next! Watch for #${o.ticketNumber} on the pickup board.`
+  }
+}
+
+async function pollOrder(id) {
+  try {
+    const r = await fetch('/api/orders/' + encodeURIComponent(id), { cache: 'no-store' })
+    if (r.ok) {
+      const o = await r.json()
+      renderTracker(o)
+      if (['completed', 'refunded', 'cancelled'].includes(o.status)) return
+    }
+  } catch { /* offline blip — keep trying */ }
+  state.trackTimer = setTimeout(() => pollOrder(id), 4000)
+}
+
 function showConfirmation(order) {
+  state.readyShown = false
   qs('confirmTicket').textContent = `#${order.ticketNumber}`
   qs('confirmName').textContent = order.customerName && order.customerName !== 'Guest' ? `Thank you, ${order.customerName}!` : 'Order placed!'
   qs('confirmSummary').innerHTML = order.items.map((i) => `<li><span>${i.quantity}× ${esc(i.name)}</span></li>`).join('')
     + `<li class="tot"><span>Total paid</span><span>${fmt(order.total)}</span></li>`
   qs('customerName').value = ''
   renderCart()
+  renderTracker({ ...order, ahead: 0, pickupInstructions: state.settings.pickupInstructions })
+  const link = qs('confirmTrack')
+  link.href = '/track/' + encodeURIComponent(order.id)
+  link.hidden = MODE !== 'online'
+  try { localStorage.setItem('lastOrderId', order.id) } catch {}
   qs('confirmModal').classList.remove('hidden')
   qs('confirmModal').querySelector('[data-action="close-confirm"]').focus()
+  clearTimeout(state.trackTimer); pollOrder(order.id)
   clearTimeout(state.confirmTimer)
-  state.confirmTimer = setTimeout(closeConfirm, 20000)
+  // Kiosk resets for the next customer; the phone/web version stays until the customer closes it.
+  if (MODE === 'kiosk') state.confirmTimer = setTimeout(closeConfirm, 60000)
 }
-function closeConfirm() { clearTimeout(state.confirmTimer); qs('confirmModal').classList.add('hidden') }
+function closeConfirm() { clearTimeout(state.confirmTimer); clearTimeout(state.trackTimer); qs('confirmModal').classList.add('hidden') }
+
+// ─── Open / paused + sold-out refresh ─────────────────────────────────────────
+function applyOpenState() {
+  const open = state.settings.ordersOpen !== false
+  const bar = qs('closedBar')
+  bar.hidden = open
+  qs('closedText').textContent = state.settings.closedMessage || 'We’re not taking orders right now.'
+  document.body.classList.toggle('is-closed', !open)
+  const btn = qs('checkoutBtn')
+  if (!open) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-pause" aria-hidden="true"></i> Ordering paused' }
+  else renderCart()
+}
+async function refreshMenu() {
+  try {
+    const data = await (await fetch('/api/menu', { cache: 'no-store' })).json()
+    state.menu = data.menu; state.categories = data.categories; state.settings = data.settings || {}
+    // drop anything that has just sold out from the cart
+    Object.keys(state.cart).forEach((k) => { const m = state.menu.find((x) => x.id === state.cart[k].item.id); if (!m || !m.available) { toast(`${state.cart[k].item.name} just sold out`, '#ef4444'); delete state.cart[k] } })
+    const s = state.settings
+    state.squareMode = !!s.squareMode; state.squareAppId = s.squareAppId || ''; state.squareLocationId = s.squareLocationId || ''
+    state.stripeMode = !!s.stripeMode; state.stripePublishableKey = s.stripePublishableKey || ''
+    renderCategories(); renderMenu(); renderCart(); applyOpenState()
+  } catch { /* offline — keep what we have */ }
+}
 
 // ─── Attract mode (idle video loop) ───────────────────────────────────────────
 function pokeActivity() { state.lastActivity = Date.now() }
@@ -453,7 +530,7 @@ function stopAttract() {
   pokeActivity()
 }
 function idleTick() {
-  if (state.attractOn || !state.settings.attractMode) return
+  if (MODE !== 'kiosk' || state.attractOn || !state.settings.attractMode) return
   const idleMs = (state.settings.attractIdleSeconds || 60) * 1000
   const idle = Date.now() - state.lastActivity
   const payOpen = !qs('payModal').classList.contains('hidden')
@@ -527,8 +604,9 @@ async function init() {
   qs('bizTagline').textContent = s.tagline || ''
   qs('attractOrderBiz').textContent = s.businessName || "Ara's DNA"
 
-  renderCategories(); renderMenu(); renderCart()
+  renderCategories(); renderMenu(); renderCart(); applyOpenState()
   setInterval(idleTick, 1000)
+  setInterval(() => { if (document.visibilityState === 'visible' && qs('payModal').classList.contains('hidden') && qs('itemModal').classList.contains('hidden')) refreshMenu() }, 45000)
 }
 
 // ─── Mount HTML ───────────────────────────────────────────────────────────────
@@ -539,11 +617,12 @@ document.getElementById('app').innerHTML = `
       <span class="icon" aria-hidden="true">🍦</span>
       <div><h1 id="bizName">Ara's DNA</h1><div id="bizTagline" class="tagline"></div></div>
     </a>
-    <nav class="header-right" aria-label="Staff links">
-      <a href="/admin"><i class="fas fa-gear" aria-hidden="true"></i><span> Admin</span></a>
-      <a href="/kds"><i class="fas fa-utensils" aria-hidden="true"></i><span> Kitchen</span></a>
+    <nav class="header-right" aria-label="Order links">
+      <a href="/pickup" target="_blank" rel="noopener"><i class="fas fa-bullhorn" aria-hidden="true"></i><span> Pickup board</span></a>
+      <a id="myOrderLink" href="#" hidden><i class="fas fa-receipt" aria-hidden="true"></i><span> My order</span></a>
     </nav>
   </header>
+  <div id="closedBar" class="closed-bar" role="status" hidden><i class="fas fa-circle-pause" aria-hidden="true"></i> <span id="closedText"></span></div>
 
   <div class="kiosk-layout">
     <main class="kiosk-menu">
@@ -606,10 +685,11 @@ document.getElementById('app').innerHTML = `
       <div class="confirm-subtitle">Your ticket number</div>
       <div class="ticket-number" id="confirmTicket">#101</div>
       <ul class="confirm-summary" id="confirmSummary"></ul>
-      <p class="confirm-subtitle sm">We’ll call your name when it’s ready.</p>
+      <ol class="confirm-steps" id="confirmSteps" aria-label="Order progress"></ol>
+      <p class="confirm-msg" id="confirmMsg" role="status" aria-live="polite"></p>
       <div class="confirm-links">
-        <a href="/kds" class="conf-link secondary"><i class="fas fa-tv" aria-hidden="true"></i> Kitchen screen</a>
-        <button class="conf-link primary" data-action="close-confirm"><i class="fas fa-plus" aria-hidden="true"></i> New order</button>
+        <a id="confirmTrack" href="#" class="conf-link secondary" hidden><i class="fas fa-mobile-screen" aria-hidden="true"></i> Track on this phone</a>
+        <button class="conf-link primary" data-action="close-confirm"><i class="fas fa-check" aria-hidden="true"></i> Done</button>
       </div>
     </div>
   </div>
@@ -625,5 +705,11 @@ document.getElementById('app').innerHTML = `
     </div>
   </div>
 `
+
+;(function () {
+  const id = (() => { try { return localStorage.getItem('lastOrderId') } catch { return null } })()
+  const a = document.getElementById('myOrderLink')
+  if (id && MODE === 'online') { a.href = '/track/' + encodeURIComponent(id); a.hidden = false }
+})()
 
 init()

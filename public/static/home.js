@@ -12,7 +12,7 @@ document.getElementById('app').innerHTML = `
       <a href="#videos">Videos</a>
       <a href="#visit">Visit</a>
       <a class="nav-admin" href="/admin"><i class="fas fa-lock" aria-hidden="true"></i> Admin</a>
-      <a class="btn btn-primary" href="/kiosk"><i class="fas fa-bag-shopping" aria-hidden="true"></i> Order now</a>
+      <a class="btn btn-primary" href="/order"><i class="fas fa-bag-shopping" aria-hidden="true"></i> Order now</a>
     </nav>
   </div>
 </header>
@@ -26,7 +26,7 @@ document.getElementById('app').innerHTML = `
         <h1 id="hero-title">Hand-crafted <em>ice cream</em>, Island Ice &amp; hot dogs.</h1>
         <p class="lead" id="heroTagline">Old-fashioned ice cream, premium Italian ice, all-beef dogs and fresh lemonade — made with love.</p>
         <div class="hero-cta">
-          <a class="btn btn-primary" href="/kiosk"><i class="fas fa-bag-shopping" aria-hidden="true"></i> Start your order</a>
+          <a class="btn btn-primary" href="/order"><i class="fas fa-bag-shopping" aria-hidden="true"></i> Start your order</a>
           <a class="btn btn-ghost" href="#videos"><i class="fas fa-circle-play" aria-hidden="true"></i> Watch videos</a>
         </div>
         <div class="hero-meta">
@@ -64,7 +64,7 @@ document.getElementById('app').innerHTML = `
       <div class="visit-grid">
         <div class="visit-card"><i class="fas fa-clock" aria-hidden="true"></i><h3>Hours</h3><p id="visitHours">—</p></div>
         <div class="visit-card"><i class="fas fa-phone" aria-hidden="true"></i><h3>Call us</h3><p id="visitPhone">—</p></div>
-        <div class="visit-card"><i class="fas fa-bag-shopping" aria-hidden="true"></i><h3>Order ahead</h3><p>Use the <a href="/kiosk">ordering kiosk</a> — pay by card or cash.</p></div>
+        <div class="visit-card"><i class="fas fa-bag-shopping" aria-hidden="true"></i><h3>Order ahead</h3><p><a href="/order">Order online</a> or at the trailer kiosk — pay by card, track your order live, and pick up when your name shows on the <a href="/pickup">pickup board</a>.</p></div>
       </div>
     </div>
   </section>
@@ -73,7 +73,7 @@ document.getElementById('app').innerHTML = `
 <footer>
   <div class="wrap">
     <span>&copy; <span id="year"></span> <span id="footName">Ara's DNA</span></span>
-    <span><a href="/kiosk">Kiosk</a><a href="/kds">Kitchen</a><a href="/admin">Admin</a></span>
+    <span><a href="/order">Order online</a><a href="/pickup">Pickup board</a><a href="/kds">Kitchen</a><a href="/admin">Admin</a></span>
   </div>
 </footer>
 

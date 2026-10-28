@@ -3,39 +3,19 @@ import { cors } from 'hono/cors'
 import { serveStatic } from 'hono/cloudflare-workers'
 
 // ─── Bindings ───────────────────────────────────────────────────────────────
-// VIDEOS = R2 bucket for uploaded videos. ADMIN_PIN / *_SECRET / *_TOKEN = secrets.
+// DB = D1 database (orders, settings, menu). VIDEOS = R2 bucket for uploaded videos.
+// ADMIN_PIN / KDS_PIN / STRIPE_SECRET_KEY / SQUARE_ACCESS_TOKEN = secrets.
 type Bindings = {
+  DB?: any
   VIDEOS?: any
   ADMIN_PIN?: string
+  KDS_PIN?: string
   STRIPE_SECRET_KEY?: string
   SQUARE_ACCESS_TOKEN?: string
 }
 
-// ─── In-Memory Store (KV-ready interface) ───────────────────────────────────
-let orderSeq = 100
-const orders: Order[] = []
-const menuItems: MenuItem[] = getDefaultMenu()
-const settings: AppSettings = {
-  businessName: "Ara's DNA",
-  taxRate: 0.08,
-  // Stripe (for Tap to Pay later)
-  stripeMode: false,
-  stripePublishableKey: '',
-  // Square (online card entry — use now)
-  squareMode: false,
-  squareAppId: '',
-  squareLocationId: '',
-  // General
-  operatingHours: 'Call 813-522-3553',
-  phone: '813-522-3553',
-  tagline: 'Hand-Crafted Ice Cream · Island Ice · Hot Dogs',
-  // Kiosk idle "attract" screen that loops the uploaded videos
-  attractMode: true,
-  attractIdleSeconds: 60,
-}
-
 // ─── Types ──────────────────────────────────────────────────────────────────
-type OrderStatus = 'paid' | 'queued' | 'in_prep' | 'ready' | 'completed' | 'cancelled' | 'refunded'
+type OrderStatus = 'pending_payment' | 'paid' | 'queued' | 'in_prep' | 'ready' | 'completed' | 'cancelled' | 'refunded'
 type Channel = 'kiosk' | 'staff' | 'online'
 
 interface OrderItem {
@@ -104,6 +84,12 @@ interface AppSettings {
   tagline: string
   attractMode: boolean
   attractIdleSeconds: number
+  // Self-serve operation
+  ordersOpen: boolean
+  closedMessage: string
+  pickupInstructions: string
+  allowDemoOrders: boolean   // TEST MODE: lets orders through without card payment
+  timezone: string
 }
 
 // ─── Ara's DNA Menu ──────────────────────────────────────────────────────────
@@ -517,6 +503,12 @@ function getDefaultMenu(): MenuItem[] {
 function uid() {
   return Math.random().toString(36).slice(2, 10).toUpperCase()
 }
+// Unguessable id for orders (they're used in public tracking links)
+function oid() {
+  const a = new Uint8Array(10)
+  crypto.getRandomValues(a)
+  return Array.from(a, b => (b % 36).toString(36)).join('').toUpperCase()
+}
 
 function now() {
   return new Date().toISOString()
@@ -542,7 +534,7 @@ function unitPrice(m: MenuItem, mods: string[]) {
 
 // Validate a client cart against the real menu. The server is the source of
 // truth for prices — never trust prices coming from the browser.
-function buildItems(raw: any): { items: OrderItem[] } | { error: string } {
+function buildItems(raw: any, menuItems: MenuItem[]): { items: OrderItem[] } | { error: string } {
   if (!Array.isArray(raw) || !raw.length) return { error: 'Cart is empty' }
   if (raw.length > 50) return { error: 'Too many items in one order' }
   const items: OrderItem[] = []
@@ -572,374 +564,655 @@ function safeEqual(a: string, b: string) {
   return r === 0
 }
 
+// ─── Storage ─────────────────────────────────────────────────────────────────
+// Cloudflare D1 when the `DB` binding exists (production + `wrangler --d1`).
+// Falls back to in-memory so a bare `wrangler pages dev` still works (data is
+// lost on restart and NOT shared between isolates — fine for a quick preview).
+const PAID_STATES: OrderStatus[] = ['paid', 'queued', 'in_prep', 'ready', 'completed']
+const ACTIVE_STATES: OrderStatus[] = ['paid', 'queued', 'in_prep', 'ready']
+const ALL_STATES: OrderStatus[] = ['pending_payment', 'paid', 'queued', 'in_prep', 'ready', 'completed', 'cancelled', 'refunded']
+
+function defaultSettings(): AppSettings {
+  return {
+    businessName: "Ara's DNA",
+    taxRate: 0.08,
+    stripeMode: false,
+    stripePublishableKey: '',
+    squareMode: false,
+    squareAppId: '',
+    squareLocationId: '',
+    operatingHours: 'Call 813-522-3553',
+    phone: '813-522-3553',
+    tagline: 'Hand-Crafted Ice Cream · Island Ice · Hot Dogs',
+    attractMode: true,
+    attractIdleSeconds: 60,
+    ordersOpen: true,
+    closedMessage: "We're not taking orders right now. Please check back soon!",
+    pickupInstructions: 'Grab your order from the pickup shelf. Enjoy!',
+    allowDemoOrders: false,
+    timezone: 'America/New_York',
+  }
+}
+
+const mem = {
+  orders: [] as Order[],
+  kv: new Map<string, string>(),
+  seq: 100,
+  rl: new Map<string, { n: number; t: number }>(),
+}
+let schemaReady = false
+
+async function ensureSchema(db: any) {
+  if (schemaReady) return
+  await db.batch([
+    db.prepare(`CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, ticket INTEGER NOT NULL, status TEXT NOT NULL, payment_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, data TEXT NOT NULL)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, created_at)`),
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_orders_payment ON orders(payment_id)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS rate_limits (k TEXT PRIMARY KEY, n INTEGER NOT NULL, t INTEGER NOT NULL)`),
+  ])
+  schemaReady = true
+}
+
+function makeStore(env: Bindings | undefined) {
+  const db = env?.DB
+  let settingsCache: AppSettings | null = null
+  let menuCache: MenuItem[] | null = null
+
+  const kvGet = async (k: string): Promise<string | null> => {
+    if (!db) return mem.kv.get(k) ?? null
+    const r = await db.prepare('SELECT value FROM kv WHERE key = ?').bind(k).first()
+    return r ? (r.value as string) : null
+  }
+  const kvSet = async (k: string, v: string) => {
+    if (!db) { mem.kv.set(k, v); return }
+    await db.prepare('INSERT INTO kv(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').bind(k, v).run()
+  }
+
+  return {
+    persistent: !!db,
+    async init() { if (db) await ensureSchema(db) },
+
+    async getSettings(): Promise<AppSettings> {
+      if (settingsCache) return settingsCache
+      let saved: any = {}
+      try { saved = JSON.parse((await kvGet('settings')) || '{}') } catch { /* ignore */ }
+      settingsCache = { ...defaultSettings(), ...saved }
+      return settingsCache!
+    },
+    async saveSettings(s: AppSettings) { settingsCache = s; await kvSet('settings', JSON.stringify(s)) },
+
+    async getMenu(): Promise<MenuItem[]> {
+      if (menuCache) return menuCache
+      let saved: MenuItem[] | null = null
+      try { const raw = await kvGet('menu'); if (raw) saved = JSON.parse(raw) } catch { /* ignore */ }
+      menuCache = saved && Array.isArray(saved) && saved.length ? saved : getDefaultMenu()
+      return menuCache
+    },
+    async saveMenu(m: MenuItem[]) { menuCache = m; await kvSet('menu', JSON.stringify(m)) },
+
+    // Atomic ticket counter
+    async nextTicket(): Promise<number> {
+      if (!db) return ++mem.seq
+      const r = await db.prepare(
+        `INSERT INTO kv(key, value) VALUES('seq', '101') ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1 RETURNING value`
+      ).first()
+      return Number(r.value)
+    },
+
+    async putOrder(o: Order) {
+      if (!db) {
+        const i = mem.orders.findIndex(x => x.id === o.id)
+        if (i >= 0) mem.orders[i] = o; else mem.orders.unshift(o)
+        return
+      }
+      await db.prepare(
+        `INSERT INTO orders(id, ticket, status, payment_id, created_at, updated_at, data) VALUES(?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET status = excluded.status, payment_id = excluded.payment_id, updated_at = excluded.updated_at, data = excluded.data`
+      ).bind(o.id, o.ticketNumber, o.status, o.paymentIntentId || null, o.createdAt, o.updatedAt, JSON.stringify(o)).run()
+    },
+    async getOrder(id: string): Promise<Order | null> {
+      if (!db) return mem.orders.find(o => o.id === id) || null
+      const r = await db.prepare('SELECT data FROM orders WHERE id = ?').bind(id).first()
+      return r ? JSON.parse(r.data) : null
+    },
+    async findByPayment(pid: string): Promise<Order | null> {
+      if (!pid) return null
+      if (!db) return mem.orders.find(o => o.paymentIntentId === pid) || null
+      const r = await db.prepare('SELECT data FROM orders WHERE payment_id = ?').bind(pid).first()
+      return r ? JSON.parse(r.data) : null
+    },
+    async listOrders(opts: { statuses?: OrderStatus[]; limit?: number } = {}): Promise<Order[]> {
+      const limit = opts.limit ?? 500
+      const st = opts.statuses
+      if (!db) {
+        const r = st ? mem.orders.filter(o => st.includes(o.status)) : [...mem.orders]
+        return r.slice(0, limit)
+      }
+      const where = st && st.length ? `WHERE status IN (${st.map(() => '?').join(',')})` : ''
+      const { results } = await db.prepare(`SELECT data FROM orders ${where} ORDER BY created_at DESC LIMIT ?`).bind(...(st || []), limit).all()
+      return results.map((r: any) => JSON.parse(r.data))
+    },
+    // Abandoned checkouts (customer closed the page before paying) are just noise.
+    async purgeStale() {
+      const cutoff = new Date(Date.now() - 2 * 3600 * 1000).toISOString()
+      if (!db) { mem.orders = mem.orders.filter(o => !(o.status === 'pending_payment' && o.createdAt < cutoff)); return }
+      await db.prepare(`DELETE FROM orders WHERE status = 'pending_payment' AND created_at < ?`).bind(cutoff).run()
+    },
+
+    // Fixed-window counter. Returns the count INCLUDING this hit.
+    async rlHit(key: string, windowSec: number): Promise<number> {
+      const t = Math.floor(Date.now() / 1000)
+      if (!db) {
+        const e = mem.rl.get(key)
+        if (!e || t - e.t > windowSec) { mem.rl.set(key, { n: 1, t }); return 1 }
+        e.n++; return e.n
+      }
+      const r = await db.prepare(
+        `INSERT INTO rate_limits(k, n, t) VALUES(?1, 1, ?2) ON CONFLICT(k) DO UPDATE SET
+           n = CASE WHEN ?2 - t > ?3 THEN 1 ELSE n + 1 END,
+           t = CASE WHEN ?2 - t > ?3 THEN ?2 ELSE t END RETURNING n`
+      ).bind(key, t, windowSec).first()
+      return Number(r.n)
+    },
+    async rlPeek(key: string, windowSec: number): Promise<number> {
+      const t = Math.floor(Date.now() / 1000)
+      if (!db) { const e = mem.rl.get(key); return e && t - e.t <= windowSec ? e.n : 0 }
+      const r = await db.prepare('SELECT n, t FROM rate_limits WHERE k = ?').bind(key).first()
+      return r && t - r.t <= windowSec ? Number(r.n) : 0
+    },
+  }
+}
+type Store = ReturnType<typeof makeStore>
+type Env = { Bindings: Bindings; Variables: { store: Store } }
+
+// What a customer is allowed to see about an order (no payment ids, no notes).
+function publicOrder(o: Order) {
+  return {
+    id: o.id, ticketNumber: o.ticketNumber, customerName: o.customerName, channel: o.channel,
+    items: o.items.map(i => ({ name: i.name, quantity: i.quantity, modifiers: i.modifiers, price: i.price })),
+    subtotal: o.subtotal, tax: o.tax, total: o.total,
+    status: o.status, createdAt: o.createdAt, updatedAt: o.updatedAt,
+  }
+}
+const firstName = (n: string) => (n && n !== 'Guest' ? n.split(/\s+/)[0].slice(0, 14) : '')
+
+function setStatus(o: Order, status: OrderStatus) {
+  o.status = status
+  o.updatedAt = now()
+  o.statusHistory.push({ status, at: o.updatedAt })
+}
+
+async function newOrder(store: Store, settings: AppSettings, p: {
+  customerName: string; channel: Channel; items: OrderItem[]; notes: string
+  status: OrderStatus; paymentMethod: string; paymentIntentId?: string
+}): Promise<Order> {
+  const { subtotal, tax, total } = calcOrder(p.items, settings.taxRate)
+  const t = now()
+  const order: Order = {
+    id: oid(), ticketNumber: await store.nextTicket(), customerName: p.customerName, channel: p.channel,
+    items: p.items, subtotal, tax, total, status: p.status, paymentMethod: p.paymentMethod,
+    paymentIntentId: p.paymentIntentId, createdAt: t, updatedAt: t,
+    statusHistory: [{ status: p.status, at: t }], notes: p.notes, priority: false,
+  }
+  await store.putOrder(order)
+  return order
+}
+
+// Payment confirmed -> the order finally appears on the kitchen screen.
+async function markPaid(store: Store, o: Order) {
+  if (o.status !== 'pending_payment') return o
+  setStatus(o, 'paid')
+  await store.putOrder(o)
+  return o
+}
+
+function clientIp(c: any) {
+  const h = (n: string) => c.req.header(n)
+  return h('cf-connecting-ip') || (h('x-forwarded-for') || '').split(',')[0].trim() || 'local'
+}
+
+// Returns a 429 Response when the caller has used up its allowance, else null.
+async function limited(c: any, name: string, max: number, windowSec: number) {
+  const store: Store = c.get('store')
+  const n = await store.rlHit(`${name}:${clientIp(c)}`, windowSec)
+  if (n > max) {
+    c.header('Retry-After', String(windowSec))
+    return c.json({ error: 'Too many attempts. Please wait a few minutes and try again.' }, 429)
+  }
+  return null
+}
+
+// PIN check with brute-force lockout (10 wrong PINs / 15 min per IP).
+async function pinGate(c: any, allowed: (string | undefined)[]): Promise<Response | null> {
+  const pins = allowed.filter(Boolean) as string[]
+  if (!pins.length) return null // no PIN configured -> open (local dev)
+  const store: Store = c.get('store')
+  const ip = clientIp(c)
+  if ((await store.rlPeek(`pinfail:${ip}`, 900)) >= 10) {
+    return c.json({ error: 'Too many wrong PINs. Try again in 15 minutes.' }, 429)
+  }
+  const given = c.req.header('x-admin-pin') || ''
+  if (pins.some(p => safeEqual(given, p))) return null
+  if (given) await store.rlHit(`pinfail:${ip}`, 900)
+  return c.json({ error: 'PIN required' }, 401)
+}
+
+// ─── Payment-processor helpers ───────────────────────────────────────────────
+const stripeHeaders = (key: string) => ({ Authorization: `Bearer ${key}`, 'Content-Type': 'application/x-www-form-urlencoded' })
+const squareHost = (s: AppSettings) => s.squareAppId.startsWith('sandbox-') ? 'https://connect.squareupsandbox.com' : 'https://connect.squareup.com'
+
+// The ONLY way a Stripe order becomes paid: ask Stripe itself (never trust the browser or a webhook body).
+async function verifyStripePayment(key: string, order: Order): Promise<boolean> {
+  if (!order.paymentIntentId) return false
+  const res = await fetch(`https://api.stripe.com/v1/payment_intents/${encodeURIComponent(order.paymentIntentId)}`, { headers: stripeHeaders(key) })
+  const pi: any = await res.json().catch(() => ({}))
+  return res.ok && pi.status === 'succeeded' && pi.amount_received === order.total && pi.metadata?.orderId === order.id
+}
+
 // ─── App ─────────────────────────────────────────────────────────────────────
-const app = new Hono<{ Bindings: Bindings }>()
+const app = new Hono<Env>()
 app.use('*', cors())
 
 // Static assets (CSS, JS, fonts, webfonts)
 app.use('/static/*', serveStatic({ root: './public' }))
 
-// Admin PIN gate. If the ADMIN_PIN secret is set, every /api/admin/* call needs
-// the matching x-admin-pin header. (If unset, admin stays open as before, but
-// video uploads are refused — see the video routes.)
-app.use('/api/admin/*', async (c, next) => {
-  const pin = c.env?.ADMIN_PIN
-  if (pin && !safeEqual(c.req.header('x-admin-pin') || '', pin)) {
-    return c.json({ error: 'Admin PIN required' }, 401)
-  }
+// Every API call gets a storage handle (D1 if bound, otherwise in-memory).
+app.use('/api/*', async (c, next) => {
+  const store = makeStore(c.env)
+  try { await store.init() } catch (e: any) { return c.json({ error: 'Database unavailable: ' + (e?.message || e) }, 503) }
+  c.set('store', store)
   await next()
 })
-app.get('/api/admin/ping', (c) => c.json({
-  ok: true,
-  pinRequired: !!c.env?.ADMIN_PIN,
-  uploads: !!c.env?.ADMIN_PIN && !!c.env?.VIDEOS,
-  storage: !!c.env?.VIDEOS,
-}))
+
+const isLocalHost = (c: any) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(c.req.header('host') || '')
+
+// Admin PIN gate for /api/admin/*. With no ADMIN_PIN secret, admin is only open on localhost.
+app.use('/api/admin/*', async (c, next) => {
+  if (!c.env?.ADMIN_PIN) {
+    if (isLocalHost(c)) return next()
+    return c.json({ error: 'Admin is locked: set the ADMIN_PIN secret first.' }, 403)
+  }
+  const denied = await pinGate(c, [c.env.ADMIN_PIN])
+  if (denied) return denied
+  await next()
+})
+app.get('/api/admin/ping', async (c) => {
+  const s = await c.get('store').getSettings()
+  return c.json({
+    ok: true,
+    pinRequired: !!c.env?.ADMIN_PIN,
+    uploads: !!c.env?.ADMIN_PIN && !!c.env?.VIDEOS,
+    storage: !!c.env?.VIDEOS,
+    database: c.get('store').persistent,
+    kdsPinSeparate: !!c.env?.KDS_PIN,
+    testMode: s.allowDemoOrders,
+    cardReady: (s.squareMode && !!c.env?.SQUARE_ACCESS_TOKEN) || (s.stripeMode && !!c.env?.STRIPE_SECRET_KEY),
+  })
+})
+
+// Kitchen PIN gate for /api/kds*. KDS_PIN (if set) or ADMIN_PIN both work.
+app.use('/api/kds', async (c, next) => kdsGate(c, next))
+app.use('/api/kds/*', async (c, next) => kdsGate(c, next))
+async function kdsGate(c: any, next: () => Promise<void>) {
+  const pins = [c.env?.KDS_PIN, c.env?.ADMIN_PIN]
+  if (!pins.some(Boolean)) {
+    if (isLocalHost(c)) return next()
+    return c.json({ error: 'Kitchen screen is locked: set the ADMIN_PIN (or KDS_PIN) secret first.' }, 403)
+  }
+  const denied = await pinGate(c, pins)
+  if (denied) return denied
+  await next()
+}
+// Card-terminal endpoints are staff-only too.
+app.use('/api/connection_token', async (c, next) => { const d = await pinGate(c, [c.env?.ADMIN_PIN]); if (d) return d; await next() })
+app.use('/api/payments/create-intent', async (c, next) => { const d = await pinGate(c, [c.env?.ADMIN_PIN]); if (d) return d; await next() })
 
 // ══════════════════════════════════════════════════════════════════
 // PUBLIC API — MENU
 // ══════════════════════════════════════════════════════════════════
-app.get('/api/menu', (c) => {
-  const categories = [...new Set(menuItems.map(i => i.category))]
-  return c.json({ menu: menuItems, categories, settings })
+app.get('/api/menu', async (c) => {
+  const store = c.get('store')
+  const [menu, settings] = await Promise.all([store.getMenu(), store.getSettings()])
+  const categories = [...new Set(menu.map(i => i.category))]
+  return c.json({ menu, categories, settings })
 })
 
-app.get('/api/menu/:id', (c) => {
-  const item = menuItems.find(i => i.id === c.req.param('id'))
+app.get('/api/menu/:id', async (c) => {
+  const item = (await c.get('store').getMenu()).find(i => i.id === c.req.param('id'))
   if (!item) return c.json({ error: 'Not found' }, 404)
   return c.json(item)
 })
 
 // ══════════════════════════════════════════════════════════════════
-// PUBLIC API — ORDERS (kiosk checkout)
+// PUBLIC API — ORDERS
 // ══════════════════════════════════════════════════════════════════
+// Shared checks for anything that creates an order or starts a payment.
+async function startCheckout(c: any, body: any) {
+  const store: Store = c.get('store')
+  const settings = await store.getSettings()
+  if (!settings.ordersOpen) return { res: c.json({ error: settings.closedMessage || 'Ordering is closed right now.', closed: true }, 403) }
+  const lim = await limited(c, 'checkout', 40, 600)
+  if (lim) return { res: lim }
+  const built = buildItems(body.items, await store.getMenu())
+  if ('error' in built) return { res: c.json({ error: built.error }, 400) }
+  return {
+    store, settings, items: built.items,
+    customerName: clean(body.customerName, 40) || 'Guest',
+    notes: clean(body.notes, 200),
+    channel: (body.channel === 'online' ? 'online' : 'kiosk') as Channel,
+  }
+}
+
+// Test-mode only: place an order with no card payment. Off by default.
 app.post('/api/orders', async (c) => {
   const body: any = await c.req.json().catch(() => ({}))
-  const customerName = clean(body.customerName, 40) || 'Guest'
-  const notes = clean(body.notes, 200)
-  const channel: Channel = ['kiosk', 'staff', 'online'].includes(body.channel) ? body.channel : 'kiosk'
-  const built = buildItems(body.items)
-  if ('error' in built) return c.json({ error: built.error }, 400)
-  const items = built.items
-
-  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
-  const order: Order = {
-    id: uid(),
-    ticketNumber: ++orderSeq,
-    customerName,
-    channel,
-    items,
-    subtotal,
-    tax,
-    total,
-    status: 'paid',
-    paymentMethod: 'demo',
-    createdAt: now(),
-    updatedAt: now(),
-    statusHistory: [{ status: 'paid', at: now() }],
-    notes,
-    priority: false,
+  const ck: any = await startCheckout(c, body)
+  if (ck.res) return ck.res
+  if (!ck.settings.allowDemoOrders) {
+    return c.json({ error: 'Card payment is required. Pay-without-card is disabled.' }, 403)
   }
-  orders.unshift(order)
-  return c.json({ order }, 201)
+  const order = await newOrder(ck.store, ck.settings, {
+    customerName: ck.customerName, channel: ck.channel, items: ck.items, notes: ck.notes,
+    status: 'paid', paymentMethod: 'demo',
+  })
+  return c.json({ order: publicOrder(order) }, 201)
 })
 
-app.get('/api/orders/:id', (c) => {
-  const o = orders.find(o => o.id === c.req.param('id'))
+// Customer order tracking. Ids are 10 random chars, so only the holder of the link/ticket can look it up.
+app.get('/api/orders/:id', async (c) => {
+  const store = c.get('store')
+  const o = await store.getOrder(c.req.param('id'))
   if (!o) return c.json({ error: 'Not found' }, 404)
-  return c.json(o)
+  const settings = await store.getSettings()
+  let ahead = 0
+  if (['paid', 'queued', 'in_prep'].includes(o.status)) {
+    const active = await store.listOrders({ statuses: ['paid', 'queued', 'in_prep'], limit: 200 })
+    ahead = active.filter(x => x.createdAt < o.createdAt).length
+  }
+  return c.json({ ...publicOrder(o), ahead, pickupInstructions: settings.pickupInstructions, businessName: settings.businessName })
+})
+
+// Public pickup board (for a TV / tablet at the trailer): first names + ticket numbers only.
+app.get('/api/pickup', async (c) => {
+  const store = c.get('store')
+  const settings = await store.getSettings()
+  const active = await store.listOrders({ statuses: ['paid', 'queued', 'in_prep', 'ready'], limit: 100 })
+  const view = (o: Order) => ({ ticket: o.ticketNumber, name: firstName(o.customerName) })
+  c.header('Cache-Control', 'no-store')
+  return c.json({
+    open: settings.ordersOpen,
+    closedMessage: settings.closedMessage,
+    businessName: settings.businessName,
+    pickupInstructions: settings.pickupInstructions,
+    ready: active.filter(o => o.status === 'ready').reverse().map(view),
+    preparing: active.filter(o => o.status !== 'ready').reverse().map(view),
+  })
 })
 
 // ══════════════════════════════════════════════════════════════════
-// STRIPE TERMINAL ENDPOINTS
+// STRIPE (card on screen + staff terminal)
 // ══════════════════════════════════════════════════════════════════
 app.post('/api/connection_token', async (c) => {
-  const STRIPE_KEY = (c.env as any)?.STRIPE_SECRET_KEY || ''
-  if (!STRIPE_KEY) return c.json({ error: 'Stripe not configured' }, 400)
-  const res = await fetch('https://api.stripe.com/v1/terminal/connection_tokens', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${STRIPE_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-  })
+  const key = c.env?.STRIPE_SECRET_KEY || ''
+  if (!key) return c.json({ error: 'Stripe not configured' }, 400)
+  const res = await fetch('https://api.stripe.com/v1/terminal/connection_tokens', { method: 'POST', headers: stripeHeaders(key) })
   const data: any = await res.json()
   if (!res.ok) return c.json({ error: data.error?.message }, 400)
   return c.json({ secret: data.secret })
 })
 
-app.post('/api/payments/create-intent', async (c) => {
-  const STRIPE_KEY = (c.env as any)?.STRIPE_SECRET_KEY || ''
-  if (!STRIPE_KEY) return c.json({ error: 'Stripe not configured' }, 400)
+// Creates the order as PENDING_PAYMENT plus a PaymentIntent. The kitchen sees nothing until Stripe confirms.
+async function createStripeOrder(c: any, mode: 'online' | 'terminal') {
+  const key = c.env?.STRIPE_SECRET_KEY || ''
+  if (!key) return c.json({ error: 'Stripe not configured' }, 400)
   const body: any = await c.req.json().catch(() => ({}))
-  const rawItems = body.items
-  const customerName = clean(body.customerName, 40) || 'Guest'
-  const notes = clean(body.notes, 200)
-
-  const built = buildItems(rawItems)
-  if ('error' in built) return c.json({ error: built.error }, 400)
-  const items = built.items
-  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
-
+  const ck: any = await startCheckout(c, body)
+  if (ck.res) return ck.res
+  const order = await newOrder(ck.store, ck.settings, {
+    customerName: ck.customerName, channel: ck.channel, items: ck.items, notes: ck.notes,
+    status: 'pending_payment', paymentMethod: mode === 'online' ? 'stripe_online' : 'stripe_terminal',
+  })
   const params = new URLSearchParams({
-    amount: String(total),
-    currency: 'usd',
-    payment_method_types: 'card_present',
-    capture_method: 'automatic',
-    'metadata[customerName]': customerName,
-    'metadata[itemCount]': String(items.length),
+    amount: String(order.total), currency: 'usd',
+    'metadata[orderId]': order.id, 'metadata[ticket]': String(order.ticketNumber), 'metadata[customerName]': order.customerName,
   })
-  const res = await fetch('https://api.stripe.com/v1/payment_intents', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${STRIPE_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
-  })
+  if (mode === 'online') params.set('payment_method_types[]', 'card')
+  else { params.set('payment_method_types[]', 'card_present'); params.set('capture_method', 'automatic') }
+  const res = await fetch('https://api.stripe.com/v1/payment_intents', { method: 'POST', headers: stripeHeaders(key), body: params.toString() })
   const data: any = await res.json()
-  if (!res.ok) return c.json({ error: data.error?.message }, 400)
-
-  // Pre-create draft order
-  const order: Order = {
-    id: uid(),
-    ticketNumber: ++orderSeq,
-    customerName,
-    channel: 'kiosk',
-    items,
-    subtotal,
-    tax,
-    total,
-    status: 'paid',
-    paymentMethod: 'stripe_terminal',
-    paymentIntentId: data.id,
-    createdAt: now(),
-    updatedAt: now(),
-    statusHistory: [{ status: 'paid', at: now() }],
-    notes,
-    priority: false,
+  if (!res.ok) {
+    setStatus(order, 'cancelled'); await ck.store.putOrder(order)
+    return c.json({ error: data.error?.message || 'Could not start payment' }, 400)
   }
-  orders.unshift(order)
+  order.paymentIntentId = data.id
+  await ck.store.putOrder(order)
+  return c.json({ clientSecret: data.client_secret, orderId: order.id, total: order.total, publishableKey: ck.settings.stripePublishableKey })
+}
+app.post('/api/payments/stripe-online', (c) => createStripeOrder(c, 'online'))
+app.post('/api/payments/create-intent', (c) => createStripeOrder(c, 'terminal'))
 
-  return c.json({ clientSecret: data.client_secret, orderId: order.id, total })
+// After the browser says "paid", we ask Stripe ourselves before releasing the order to the kitchen.
+app.post('/api/payments/stripe-confirm', async (c) => {
+  const key = c.env?.STRIPE_SECRET_KEY || ''
+  if (!key) return c.json({ error: 'Stripe not configured' }, 400)
+  const lim = await limited(c, 'confirm', 60, 600)
+  if (lim) return lim
+  const body: any = await c.req.json().catch(() => ({}))
+  const store = c.get('store')
+  const order = await store.getOrder(String(body.orderId || ''))
+  if (!order || !order.paymentMethod.startsWith('stripe')) return c.json({ error: 'Order not found' }, 404)
+  if (order.status === 'pending_payment') {
+    if (!(await verifyStripePayment(key, order))) return c.json({ error: 'Payment has not completed.' }, 402)
+    await markPaid(store, order)
+  }
+  return c.json({ order: publicOrder(order) })
 })
 
+// Stripe webhook. The body is NOT trusted: we only use it as a hint, then re-check with Stripe's API.
 app.post('/api/webhooks/stripe', async (c) => {
-  const body = await c.req.json()
-  const { type, data } = body
-  if (type === 'payment_intent.succeeded') {
-    const pi = data.object
-    const order = orders.find(o => o.paymentIntentId === pi.id)
-    if (order && order.status === 'paid') {
-      order.status = 'queued'
-      order.updatedAt = now()
-      order.statusHistory.push({ status: 'queued', at: now() })
-    }
+  const key = c.env?.STRIPE_SECRET_KEY || ''
+  const body: any = await c.req.json().catch(() => ({}))
+  if (key && body?.type === 'payment_intent.succeeded') {
+    const store = c.get('store')
+    const order = await store.findByPayment(String(body.data?.object?.id || ''))
+    if (order && order.status === 'pending_payment' && (await verifyStripePayment(key, order))) await markPaid(store, order)
   }
   return c.json({ received: true })
 })
 
 // ══════════════════════════════════════════════════════════════════
-// STRIPE ONLINE (card-not-present / screen entry)
+// SQUARE (Web Payments SDK — card entry on screen)
 // ══════════════════════════════════════════════════════════════════
-app.post('/api/payments/stripe-online', async (c) => {
-  const STRIPE_KEY = (c.env as any)?.STRIPE_SECRET_KEY || ''
-  if (!STRIPE_KEY) return c.json({ error: 'Stripe not configured' }, 400)
-  const body: any = await c.req.json().catch(() => ({}))
-  const rawItems = body.items
-  const customerName = clean(body.customerName, 40) || 'Guest'
-  const notes = clean(body.notes, 200)
-
-  const built = buildItems(rawItems)
-  if ('error' in built) return c.json({ error: built.error }, 400)
-  const items = built.items
-  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
-
-  // Create a PaymentIntent for online card entry
-  const params = new URLSearchParams({
-    amount: String(total),
-    currency: 'usd',
-    'payment_method_types[]': 'card',
-    'metadata[customerName]': customerName,
-    'metadata[source]': 'kiosk_online',
-  })
-  const res = await fetch('https://api.stripe.com/v1/payment_intents', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${STRIPE_KEY}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: params.toString(),
-  })
-  const data: any = await res.json()
-  if (!res.ok) return c.json({ error: data.error?.message }, 400)
-
-  // Pre-create the order (confirmed when webhook fires)
-  const order: Order = {
-    id: uid(), ticketNumber: ++orderSeq, customerName, channel: 'kiosk',
-    items, subtotal, tax, total,
-    status: 'paid', paymentMethod: 'stripe_online',
-    paymentIntentId: data.id,
-    createdAt: now(), updatedAt: now(),
-    statusHistory: [{ status: 'paid', at: now() }],
-    notes, priority: false,
-  }
-  orders.unshift(order)
-  return c.json({ clientSecret: data.client_secret, orderId: order.id, total, publishableKey: settings.stripePublishableKey })
-})
-
-// ══════════════════════════════════════════════════════════════════
-// SQUARE ONLINE (Web Payments SDK — card entry on screen)
-// ══════════════════════════════════════════════════════════════════
-
-// Step 1: Client requests payment token info
 app.post('/api/payments/square-init', async (c) => {
-  if (!settings.squareMode || !settings.squareAppId || !settings.squareLocationId) {
-    return c.json({ error: 'Square not configured' }, 400)
-  }
+  const settings = await c.get('store').getSettings()
+  if (!settings.squareMode || !settings.squareAppId || !settings.squareLocationId) return c.json({ error: 'Square not configured' }, 400)
   const body: any = await c.req.json().catch(() => ({}))
-  const rawItems = body.items
-  const built = buildItems(rawItems)
+  const built = buildItems(body.items, await c.get('store').getMenu())
   if ('error' in built) return c.json({ error: built.error }, 400)
-  const items = built.items
-  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
-  // Return config needed by Square Web Payments SDK on the frontend
-  return c.json({
-    appId: settings.squareAppId,
-    locationId: settings.squareLocationId,
-    total,
-    subtotal,
-    tax,
-  })
+  return c.json({ appId: settings.squareAppId, locationId: settings.squareLocationId, ...calcOrder(built.items, settings.taxRate) })
 })
 
-// Step 2: Client tokenized the card — server creates the Square payment
+// The order is created only AFTER Square reports the charge as completed.
 app.post('/api/payments/square-charge', async (c) => {
-  const SQUARE_TOKEN = (c.env as any)?.SQUARE_ACCESS_TOKEN || ''
-  if (!SQUARE_TOKEN) return c.json({ error: 'Square access token not configured on server' }, 400)
+  const token = c.env?.SQUARE_ACCESS_TOKEN || ''
+  if (!token) return c.json({ error: 'Square access token not configured on server' }, 400)
   const body: any = await c.req.json().catch(() => ({}))
-  const { sourceId } = body
-  if (!sourceId || typeof sourceId !== 'string') return c.json({ error: 'Missing card token' }, 400)
-  const rawItems = body.items
-  const customerName = clean(body.customerName, 40) || 'Guest'
-  const notes = clean(body.notes, 200)
+  if (!body.sourceId || typeof body.sourceId !== 'string') return c.json({ error: 'Missing card token' }, 400)
+  const ck: any = await startCheckout(c, body)
+  if (ck.res) return ck.res
+  const { store, settings, items } = ck
+  if (!settings.squareLocationId) return c.json({ error: 'Square not configured' }, 400)
+  const { total } = calcOrder(items, settings.taxRate)
 
-  const built = buildItems(rawItems)
-  if ('error' in built) return c.json({ error: built.error }, 400)
-  const items = built.items
-  const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
-
-  // Call Square Payments API
-  const idempotencyKey = uid() + '-' + Date.now()
-  const sqHost = settings.squareAppId.startsWith('sandbox-')
-    ? 'https://connect.squareupsandbox.com'
-    : 'https://connect.squareup.com'
-  const squareRes = await fetch(`${sqHost}/v2/payments`, {
+  // Same key on a retry => Square returns the same payment instead of charging twice.
+  const idem = clean(body.idempotencyKey, 45) || uid() + '-' + Date.now()
+  const sq = await fetch(`${squareHost(settings)}/v2/payments`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SQUARE_TOKEN}`,
-      'Content-Type': 'application/json',
-      'Square-Version': '2024-01-18',
-    },
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Square-Version': '2024-01-18' },
     body: JSON.stringify({
-      idempotency_key: idempotencyKey,
-      source_id: sourceId,
-      amount_money: { amount: total, currency: 'USD' },
-      location_id: settings.squareLocationId,
-      note: `Ara's DNA Kiosk — ${customerName}`,
+      idempotency_key: idem, source_id: body.sourceId, autocomplete: true,
+      amount_money: { amount: total, currency: 'USD' }, location_id: settings.squareLocationId,
+      note: `Ara's DNA — ${ck.customerName}`,
     }),
   })
-  const squareData: any = await squareRes.json()
-  if (!squareRes.ok || squareData.errors) {
-    const msg = squareData.errors?.[0]?.detail || 'Square payment failed'
-    return c.json({ error: msg }, 400)
+  const sqData: any = await sq.json().catch(() => ({}))
+  if (!sq.ok || sqData.errors) return c.json({ error: sqData.errors?.[0]?.detail || 'Card was declined' }, 400)
+  const pay = sqData.payment
+  if (!pay?.id || pay.status !== 'COMPLETED' || pay.amount_money?.amount !== total) {
+    return c.json({ error: 'Payment was not completed. You have not been charged.' }, 402)
   }
-
-  const squarePaymentId = squareData.payment?.id
-  const order: Order = {
-    id: uid(), ticketNumber: ++orderSeq, customerName, channel: 'kiosk',
-    items, subtotal, tax, total,
-    status: 'paid', paymentMethod: 'square_online',
-    paymentIntentId: squarePaymentId,
-    createdAt: now(), updatedAt: now(),
-    statusHistory: [{ status: 'paid', at: now() }],
-    notes, priority: false,
-  }
-  orders.unshift(order)
-  return c.json({ order, squarePaymentId })
+  const existing = await store.findByPayment(pay.id)
+  if (existing) return c.json({ order: publicOrder(existing) })
+  const order = await newOrder(store, settings, {
+    customerName: ck.customerName, channel: ck.channel, items, notes: ck.notes,
+    status: 'paid', paymentMethod: 'square_online', paymentIntentId: pay.id,
+  })
+  return c.json({ order: publicOrder(order) })
 })
 
-// Square webhook (payment.completed events)
-app.post('/api/webhooks/square', async (c) => {
-  const body = await c.req.json()
-  if (body.type === 'payment.completed') {
-    const sqId = body.data?.object?.payment?.id
-    const order = orders.find(o => o.paymentIntentId === sqId)
-    if (order) {
-      order.status = 'queued'
-      order.updatedAt = now()
-      order.statusHistory.push({ status: 'queued', at: now() })
-    }
-  }
-  return c.json({ ok: true })
-})
+// Square webhook: orders are only ever created after a completed charge, so there is nothing to change here.
+app.post('/api/webhooks/square', (c) => c.json({ ok: true }))
 
 // ══════════════════════════════════════════════════════════════════
-// KITCHEN DISPLAY (KDS)
+// KITCHEN DISPLAY (KDS) — PIN protected
 // ══════════════════════════════════════════════════════════════════
-app.get('/api/kds', (c) => {
-  const active = orders.filter(o => ['paid', 'queued', 'in_prep', 'ready'].includes(o.status))
-  return c.json({ orders: active })
+app.get('/api/kds/ping', (c) => c.json({ ok: true }))
+
+app.get('/api/kds', async (c) => {
+  const store = c.get('store')
+  // Lazy "cron": at most every 10 minutes, drop abandoned checkouts.
+  if ((await store.rlHit('purge', 600)) === 1) await store.purgeStale()
+  const [active, settings, menu] = await Promise.all([store.listOrders({ statuses: ACTIVE_STATES, limit: 200 }), store.getSettings(), store.getMenu()])
+  c.header('Cache-Control', 'no-store')
+  return c.json({
+    orders: active,
+    ordersOpen: settings.ordersOpen,
+    soldOut: menu.filter(m => !m.available).map(m => m.id),
+  })
 })
 
 app.patch('/api/kds/:id/status', async (c) => {
-  const o = orders.find(o => o.id === c.req.param('id'))
+  const store = c.get('store')
+  const o = await store.getOrder(c.req.param('id'))
   if (!o) return c.json({ error: 'Not found' }, 404)
-  const { status } = await c.req.json()
+  const body: any = await c.req.json().catch(() => ({}))
   const allowed: OrderStatus[] = ['queued', 'in_prep', 'ready', 'completed']
-  if (!allowed.includes(status as OrderStatus)) return c.json({ error: 'Invalid status' }, 400)
-  o.status = status as OrderStatus
-  o.updatedAt = now()
-  o.statusHistory.push({ status, at: now() })
+  if (!allowed.includes(body.status)) return c.json({ error: 'Invalid status' }, 400)
+  if (!PAID_STATES.includes(o.status)) return c.json({ error: `A ${o.status.replace('_', ' ')} order can't be moved` }, 409)
+  setStatus(o, body.status)
+  await store.putOrder(o)
   return c.json(o)
+})
+
+app.patch('/api/kds/:id/priority', async (c) => {
+  const store = c.get('store')
+  const o = await store.getOrder(c.req.param('id'))
+  if (!o) return c.json({ error: 'Not found' }, 404)
+  const body: any = await c.req.json().catch(() => ({}))
+  o.priority = !!body.priority
+  o.updatedAt = now()
+  await store.putOrder(o)
+  return c.json(o)
+})
+
+// One-person controls: pause/resume ordering and mark items sold out, right from the kitchen screen.
+app.post('/api/kds/open', async (c) => {
+  const store = c.get('store')
+  const body: any = await c.req.json().catch(() => ({}))
+  const s = await store.getSettings()
+  s.ordersOpen = !!body.open
+  await store.saveSettings(s)
+  return c.json({ ordersOpen: s.ordersOpen })
+})
+app.get('/api/kds/menu', async (c) => {
+  const menu = await c.get('store').getMenu()
+  return c.json({ items: menu.map(m => ({ id: m.id, name: m.name, image: m.image, category: m.category, available: m.available })) })
+})
+app.patch('/api/kds/menu/:id', async (c) => {
+  const store = c.get('store')
+  const menu = await store.getMenu()
+  const item = menu.find(i => i.id === c.req.param('id'))
+  if (!item) return c.json({ error: 'Not found' }, 404)
+  const body: any = await c.req.json().catch(() => ({}))
+  if (typeof body.available === 'boolean') item.available = body.available
+  await store.saveMenu(menu)
+  return c.json({ id: item.id, available: item.available })
 })
 
 // ══════════════════════════════════════════════════════════════════
 // ADMIN API
 // ══════════════════════════════════════════════════════════════════
-app.get('/api/admin/orders', (c) => {
-  const status = c.req.query('status')
+app.get('/api/admin/orders', async (c) => {
+  const status = c.req.query('status') as OrderStatus | undefined
   const channel = c.req.query('channel')
-  let result = [...orders]
-  if (status) result = result.filter(o => o.status === status)
+  let result = await c.get('store').listOrders({ statuses: status && ALL_STATES.includes(status) ? [status] : undefined, limit: 500 })
   if (channel) result = result.filter(o => o.channel === channel)
   return c.json({ orders: result, total: result.length })
 })
 
 app.patch('/api/admin/orders/:id/status', async (c) => {
-  const o = orders.find(o => o.id === c.req.param('id'))
+  const store = c.get('store')
+  const o = await store.getOrder(c.req.param('id'))
   if (!o) return c.json({ error: 'Not found' }, 404)
-  const { status } = await c.req.json()
-  o.status = status as OrderStatus
-  o.updatedAt = now()
-  o.statusHistory.push({ status, at: now() })
+  const body: any = await c.req.json().catch(() => ({}))
+  if (!ALL_STATES.includes(body.status)) return c.json({ error: 'Invalid status' }, 400)
+  setStatus(o, body.status)
+  await store.putOrder(o)
   return c.json(o)
 })
 
 app.patch('/api/admin/orders/:id/priority', async (c) => {
-  const o = orders.find(o => o.id === c.req.param('id'))
+  const store = c.get('store')
+  const o = await store.getOrder(c.req.param('id'))
   if (!o) return c.json({ error: 'Not found' }, 404)
-  const { priority } = await c.req.json()
-  o.priority = priority
+  const body: any = await c.req.json().catch(() => ({}))
+  o.priority = !!body.priority
   o.updatedAt = now()
+  await store.putOrder(o)
   return c.json(o)
 })
 
+// Real refund through the processor that took the payment (demo orders just change status).
 app.post('/api/admin/orders/:id/refund', async (c) => {
-  const o = orders.find(o => o.id === c.req.param('id'))
+  const store = c.get('store')
+  const o = await store.getOrder(c.req.param('id'))
   if (!o) return c.json({ error: 'Not found' }, 404)
-  o.status = 'refunded'
-  o.updatedAt = now()
-  o.statusHistory.push({ status: 'refunded', at: now() })
+  if (o.status === 'refunded') return c.json({ error: 'Already refunded' }, 409)
+  if (o.status === 'pending_payment' || o.status === 'cancelled') return c.json({ error: 'This order was never paid' }, 409)
+  const settings = await store.getSettings()
+  if (o.paymentMethod.startsWith('stripe') && o.paymentIntentId) {
+    const key = c.env?.STRIPE_SECRET_KEY || ''
+    if (!key) return c.json({ error: 'Stripe key missing — refund it in the Stripe dashboard.' }, 400)
+    const r = await fetch('https://api.stripe.com/v1/refunds', {
+      method: 'POST', headers: { ...stripeHeaders(key), 'Idempotency-Key': `refund-${o.id}` },
+      body: new URLSearchParams({ payment_intent: o.paymentIntentId }).toString(),
+    })
+    const d: any = await r.json().catch(() => ({}))
+    if (!r.ok) return c.json({ error: d.error?.message || 'Stripe refund failed' }, 502)
+  } else if (o.paymentMethod === 'square_online' && o.paymentIntentId) {
+    const token = c.env?.SQUARE_ACCESS_TOKEN || ''
+    if (!token) return c.json({ error: 'Square token missing — refund it in the Square dashboard.' }, 400)
+    const r = await fetch(`${squareHost(settings)}/v2/refunds`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Square-Version': '2024-01-18' },
+      body: JSON.stringify({ idempotency_key: `refund-${o.id}`, payment_id: o.paymentIntentId, amount_money: { amount: o.total, currency: 'USD' } }),
+    })
+    const d: any = await r.json().catch(() => ({}))
+    if (!r.ok || d.errors) return c.json({ error: d.errors?.[0]?.detail || 'Square refund failed' }, 502)
+  }
+  setStatus(o, 'refunded')
+  await store.putOrder(o)
   return c.json(o)
 })
 
 // Admin — Menu Management
-app.get('/api/admin/menu', (c) => c.json({ menu: menuItems }))
+app.get('/api/admin/menu', async (c) => c.json({ menu: await c.get('store').getMenu() }))
 
 app.patch('/api/admin/menu/:id', async (c) => {
-  const item = menuItems.find(i => i.id === c.req.param('id'))
+  const store = c.get('store')
+  const menu = await store.getMenu()
+  const item = menu.find(i => i.id === c.req.param('id'))
   if (!item) return c.json({ error: 'Not found' }, 404)
   const body: any = await c.req.json().catch(() => ({}))
   if (typeof body.name === 'string') item.name = clean(body.name, 80) || item.name
@@ -951,10 +1224,13 @@ app.patch('/api/admin/menu/:id', async (c) => {
   if (typeof body.popular === 'boolean') item.popular = body.popular
   if (Number.isFinite(body.prepTime)) item.prepTime = Math.max(0, Math.min(120, Math.round(body.prepTime)))
   if (body.calories === null || Number.isFinite(body.calories)) item.calories = body.calories ?? undefined
+  await store.saveMenu(menu)
   return c.json(item)
 })
 
 app.post('/api/admin/menu', async (c) => {
+  const store = c.get('store')
+  const menu = await store.getMenu()
   const body: any = await c.req.json().catch(() => ({}))
   if (!clean(body.name, 80)) return c.json({ error: 'Name is required' }, 400)
   const item: MenuItem = {
@@ -966,29 +1242,32 @@ app.post('/api/admin/menu', async (c) => {
     image: String(body.image || '🍽️').slice(0, 8),
     available: true,
     popular: false,
-    allergens: body.allergens || [],
-    modifiers: body.modifiers || [],
-    prepTime: body.prepTime || 5,
-    calories: body.calories,
+    allergens: [],
+    modifiers: [],
+    prepTime: Number.isFinite(body.prepTime) ? Math.max(0, Math.min(120, Math.round(body.prepTime))) : 5,
+    calories: Number.isFinite(body.calories) ? body.calories : undefined,
   }
-  menuItems.push(item)
+  menu.push(item)
+  await store.saveMenu(menu)
   return c.json(item, 201)
 })
 
-// Admin — Analytics
-app.get('/api/admin/analytics', (c) => {
+// Admin — Analytics (only paid orders count)
+app.get('/api/admin/analytics', async (c) => {
+  const store = c.get('store')
+  const settings = await store.getSettings()
+  const orders = await store.listOrders({ limit: 2000 })
   const completed = orders.filter(o => ['completed', 'ready'].includes(o.status))
-  const allPaid = orders.filter(o => o.status !== 'cancelled' && o.status !== 'refunded')
+  const allPaid = orders.filter(o => PAID_STATES.includes(o.status))
   const revenue = allPaid.reduce((s, o) => s + o.total, 0)
   const itemFreq: Record<string, number> = {}
-  allPaid.forEach(o => o.items.forEach(i => {
-    itemFreq[i.name] = (itemFreq[i.name] || 0) + i.quantity
-  }))
+  allPaid.forEach(o => o.items.forEach(i => { itemFreq[i.name] = (itemFreq[i.name] || 0) + i.quantity }))
   const topItems = Object.entries(itemFreq).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([name, count]) => ({ name, count }))
   const byHour: Record<string, number> = {}
   allPaid.forEach(o => {
-    const h = new Date(o.createdAt).getHours()
-    const label = `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}`
+    let label: string
+    try { label = new Date(o.createdAt).toLocaleString('en-US', { hour: 'numeric', hour12: true, timeZone: settings.timezone || 'America/New_York' }).replace(' ', '').toLowerCase() }
+    catch { const h = new Date(o.createdAt).getUTCHours(); label = `${h % 12 || 12}${h < 12 ? 'am' : 'pm'}` }
     byHour[label] = (byHour[label] || 0) + o.total
   })
   return c.json({
@@ -1003,34 +1282,43 @@ app.get('/api/admin/analytics', (c) => {
       kiosk: allPaid.filter(o => o.channel === 'kiosk').length,
       staff: allPaid.filter(o => o.channel === 'staff').length,
       online: allPaid.filter(o => o.channel === 'online').length,
-    }
+    },
   })
 })
 
 // Admin — Settings
-app.get('/api/admin/settings', (c) => c.json(settings))
+app.get('/api/admin/settings', async (c) => c.json(await c.get('store').getSettings()))
 app.patch('/api/admin/settings', async (c) => {
+  const store = c.get('store')
+  const settings = await store.getSettings()
   const body: any = await c.req.json().catch(() => ({}))
   const types: Record<string, string> = {
     businessName: 'string', tagline: 'string', operatingHours: 'string', phone: 'string',
     taxRate: 'number', stripeMode: 'boolean', stripePublishableKey: 'string',
     squareMode: 'boolean', squareAppId: 'string', squareLocationId: 'string',
     attractMode: 'boolean', attractIdleSeconds: 'number',
+    ordersOpen: 'boolean', closedMessage: 'string', pickupInstructions: 'string', allowDemoOrders: 'boolean',
   }
+  const longText = new Set(['closedMessage', 'pickupInstructions'])
   for (const [k, t] of Object.entries(types)) {
     const v = body[k]
     if (typeof v !== t) continue
     if (t === 'number' && !Number.isFinite(v)) continue
-    if (t === 'string') (settings as any)[k] = clean(v, 120)
+    if (t === 'string') (settings as any)[k] = clean(v, longText.has(k) ? 240 : 120)
     else if (k === 'taxRate') settings.taxRate = Math.min(Math.max(v, 0), 0.5)
     else if (k === 'attractIdleSeconds') settings.attractIdleSeconds = Math.min(Math.max(Math.round(v), 15), 600)
     else (settings as any)[k] = v
   }
+  await store.saveSettings(settings)
   return c.json(settings)
 })
 
-// Admin — Seed demo orders
-app.post('/api/admin/seed', (c) => {
+// Admin — Seed demo orders (test mode only, so fake sales never pollute real analytics)
+app.post('/api/admin/seed', async (c) => {
+  const store = c.get('store')
+  const settings = await store.getSettings()
+  if (!settings.allowDemoOrders) return c.json({ error: 'Turn on Test mode in Settings first — demo orders are blocked on a live site.' }, 403)
+  const menu = await store.getMenu()
   const names = ['Alex', 'Jordan', 'Sam', 'Casey', 'Riley', 'Morgan', 'Drew', 'Jamie']
   const statuses: OrderStatus[] = ['paid', 'queued', 'in_prep', 'ready', 'completed']
   const combos = [
@@ -1043,32 +1331,25 @@ app.post('/api/admin/seed', (c) => {
     [{ id: 'lemonade', mod: 'Large – $10.00' }, { id: 'island-ice', mod: 'Large 12 oz – $9.75' }],
     [{ id: 'hotdog-classic', mod: '2 Dogs – $8.00 (save $2)' }, { id: 'lemonade', mod: 'Medium – $7.00' }],
   ]
+  let seeded = 0
   for (let i = 0; i < 8; i++) {
-    const combo = combos[i]
-    const items: OrderItem[] = combo.map(c => {
-      const m = menuItems.find(mi => mi.id === c.id)!
-      const mods = c.mod ? [c.mod] : []
-      return { id: m.id, name: m.name, price: unitPrice(m, mods), quantity: 1, modifiers: mods, notes: '' }
+    const items: OrderItem[] = []
+    for (const cc of combos[i]) {
+      const m = menu.find(mi => mi.id === cc.id)
+      if (!m) continue
+      const mods = cc.mod ? [cc.mod] : []
+      items.push({ id: m.id, name: m.name, price: unitPrice(m, mods), quantity: 1, modifiers: mods, notes: '' })
+    }
+    if (!items.length) continue
+    const o = await newOrder(store, settings, {
+      customerName: names[i % names.length], channel: 'kiosk', items, notes: '',
+      status: statuses[Math.floor(Math.random() * statuses.length)], paymentMethod: 'demo',
     })
-    const { subtotal, tax, total } = calcOrder(items, settings.taxRate)
-    const status = statuses[Math.floor(Math.random() * statuses.length)]
-    orders.unshift({
-      id: uid(),
-      ticketNumber: ++orderSeq,
-      customerName: names[i % names.length],
-      channel: 'kiosk',
-      items,
-      subtotal, tax, total,
-      status,
-      paymentMethod: 'demo',
-      createdAt: new Date(Date.now() - Math.random() * 3600000).toISOString(),
-      updatedAt: now(),
-      statusHistory: [{ status, at: now() }],
-      notes: '',
-      priority: Math.random() > 0.8,
-    })
+    o.priority = Math.random() > 0.8
+    await store.putOrder(o)
+    seeded++
   }
-  return c.json({ seeded: 8 })
+  return c.json({ seeded })
 })
 
 // ══════════════════════════════════════════════════════════════════
@@ -1211,13 +1492,16 @@ app.get('/favicon.ico', (c) => {
   return c.body('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🍦</text></svg>')
 })
 
-app.get('/api/health', (c) => c.json({ ok: true, orders: orders.length, menu: menuItems.length }))
+app.get('/api/health', (c) => c.json({ ok: true, database: !!c.env?.DB }))
 
 // ══════════════════════════════════════════════════════════════════
 // PAGE ROUTES — serve HTML shells
 // ══════════════════════════════════════════════════════════════════
 app.get('/', (c) => c.html(homeHTML()))
-app.get('/kiosk', (c) => c.html(kioskHTML()))
+app.get('/kiosk', (c) => c.html(kioskHTML('kiosk')))
+app.get('/order', (c) => c.html(kioskHTML('online')))
+app.get('/track/:id', (c) => c.html(trackHTML()))
+app.get('/pickup', (c) => c.html(pickupHTML()))
 app.get('/kds', (c) => c.html(kdsHTML()))
 app.get('/admin', (c) => c.html(adminHTML()))
 app.get('/admin/*', (c) => c.html(adminHTML()))
@@ -1244,19 +1528,57 @@ function homeHTML() {
 </html>`
 }
 
-function kioskHTML() {
+function kioskHTML(mode: 'kiosk' | 'online') {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0${mode === 'kiosk' ? ', maximum-scale=1.0' : ''}" />
   <title>Ara's DNA — Order</title>
+  <link rel="icon" href="/favicon.ico"/>
   <link rel="stylesheet" href="/static/fa.min.css"/>
   <link rel="stylesheet" href="/static/kiosk.css"/>
 </head>
-<body>
+<body data-mode="${mode}">
   <div id="app"></div>
   <script src="/static/kiosk.js"></script>
+</body>
+</html>`
+}
+
+function trackHTML() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <title>Your order — Ara's DNA</title>
+  <link rel="icon" href="/favicon.ico"/>
+  <link rel="stylesheet" href="/static/fa.min.css"/>
+  <link rel="stylesheet" href="/static/track.css"/>
+</head>
+<body>
+  <div id="app"></div>
+  <script src="/static/track.js"></script>
+</body>
+</html>`
+}
+
+function pickupHTML() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Order Pickup — Ara's DNA</title>
+  <link rel="icon" href="/favicon.ico"/>
+  <link rel="stylesheet" href="/static/fa.min.css"/>
+  <link rel="stylesheet" href="/static/track.css"/>
+</head>
+<body class="pickup-body">
+  <div id="app"></div>
+  <script src="/static/pickup.js"></script>
 </body>
 </html>`
 }

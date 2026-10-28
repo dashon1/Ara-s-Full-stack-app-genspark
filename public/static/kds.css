@@ -130,3 +130,25 @@ body { font-family: 'Segoe UI', system-ui, sans-serif; background: #030712; colo
 .col-tickets{min-height:0;align-content:flex-start}
 .tick-btn.priority-btn{min-width:44px;font-size:16px}
 @media(max-width:800px){.kds-body{flex-direction:column;overflow-y:auto}.kds-col{flex:none;border-right:0;border-bottom:1px solid var(--border)}}
+
+/* PIN overlay + one-person controls */
+.hidden { display: none !important; }
+.kds-login { position: fixed; inset: 0; z-index: 500; background: rgba(3,7,18,.96); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.kds-login-box { background: #111827; border: 1px solid #374151; border-radius: 18px; padding: 28px 26px; width: 100%; max-width: 360px; text-align: center; }
+.kds-login-box h2 { font-size: 22px; font-weight: 800; margin: 6px 0 4px; }
+.kds-login-box p { color: #9ca3af; font-size: 13px; margin-bottom: 14px; }
+.kds-login-box input { width: 100%; padding: 14px; font-size: 22px; letter-spacing: 6px; text-align: center; background: #1f2937; border: 1px solid #374151; border-radius: 12px; color: #fff; }
+.kds-login-box input:focus { outline: 2px solid var(--brand); }
+.kds-login-box button[type=submit], .kds-login-box > button { width: 100%; margin-top: 14px; padding: 14px; background: var(--brand); color: #fff; font-weight: 800; font-size: 16px; border: 0; border-radius: 12px; cursor: pointer; }
+.kds-login-msg { color: #fca5a5; font-size: 13px; min-height: 18px; margin-top: 8px; }
+.so-box { max-width: 460px; max-height: 88vh; display: flex; flex-direction: column; }
+.so-list { overflow-y: auto; text-align: left; display: flex; flex-direction: column; gap: 6px; }
+.so-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 12px 14px; background: #1f2937; border: 1px solid #374151; border-radius: 10px; color: #fff; font-size: 14px; cursor: pointer; min-height: 48px; }
+.so-row .so-tag { font-size: 11px; font-weight: 800; color: #22c55e; white-space: nowrap; }
+.so-row.out { background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.4); }
+.so-row.out .so-tag { color: #f87171; }
+.open-btn.is-open { border-color: #16a34a; color: #86efac; }
+.open-btn.is-paused { background: #b91c1c; border-color: #ef4444; font-weight: 800; animation: pulse 1.5s infinite; }
+.conn-warn { background: #b45309; color: #fff; text-align: center; padding: 8px; font-size: 13px; font-weight: 700; }
+.conn-warn[hidden] { display: none; }
+@media (max-width: 900px) { .kds-controls { flex-wrap: wrap; } }

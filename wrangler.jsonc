@@ -9,5 +9,12 @@
   // Create it once with:  npx wrangler r2 bucket create webapp-videos
   "r2_buckets": [
     { "binding": "VIDEOS", "bucket_name": "webapp-videos" }
+  ],
+
+  // D1 database: orders, settings, menu edits, ticket counter.
+  // Create it once with:  npx wrangler d1 create webapp-production
+  // then paste the printed database_id below (local dev works with any placeholder).
+  "d1_databases": [
+    { "binding": "DB", "database_name": "webapp-production", "database_id": "REPLACE-WITH-REAL-ID", "migrations_dir": "migrations" }
   ]
 }

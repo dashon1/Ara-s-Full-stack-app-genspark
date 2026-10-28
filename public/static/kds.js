@@ -1,3 +1,38 @@
+// ─── Kitchen PIN: attach to every /api/kds call; show login on 401/403 ───────
+let kdsPin = localStorage.getItem('kdsPin') || ''
+const _fetch = window.fetch.bind(window)
+let locked = false
+window.fetch = async (url, opts = {}) => {
+  const isKds = typeof url === 'string' && url.startsWith('/api/kds')
+  if (isKds && kdsPin) opts = { ...opts, headers: { ...(opts.headers || {}), 'x-admin-pin': kdsPin } }
+  const res = await _fetch(url, opts)
+  if (isKds && (res.status === 401 || res.status === 403 || res.status === 429)) {
+    const d = await res.clone().json().catch(() => ({}))
+    showLogin(res.status === 401 ? (kdsPin ? 'Wrong PIN' : '') : (d.error || 'Locked'))
+  }
+  return res
+}
+function showLogin(msg) {
+  locked = true
+  const o = document.getElementById('kdsLogin'); if (!o) return
+  o.classList.remove('hidden')
+  document.getElementById('kdsLoginMsg').textContent = msg || ''
+  setTimeout(() => document.getElementById('kdsPinInput').focus(), 50)
+}
+window.submitKdsLogin = async function() {
+  const inp = document.getElementById('kdsPinInput'); const pin = inp.value.trim(); if (!pin) return
+  const r = await _fetch('/api/kds/ping', { headers: { 'x-admin-pin': pin } })
+  if (r.ok) {
+    kdsPin = pin; localStorage.setItem('kdsPin', pin); inp.value = ''
+    document.getElementById('kdsLogin').classList.add('hidden'); locked = false
+    fetchOrders()
+  } else {
+    const d = await r.json().catch(() => ({}))
+    document.getElementById('kdsLoginMsg').textContent = r.status === 401 ? 'Incorrect PIN' : (d.error || 'Locked'); inp.select()
+  }
+}
+window.kdsLogout = function() { localStorage.removeItem('kdsPin'); kdsPin = ''; location.reload() }
+
 function escH(v){return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 // ─── State ───────────────────────────────────────────────────────────────────
 const state = {
@@ -67,42 +102,86 @@ function playAlert() {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 async function fetchOrders() {
-  const res = await fetch('/api/kds')
-  const data = await res.json()
+  if (locked) return
+  let data
+  try {
+    const res = await fetch('/api/kds')
+    if (!res.ok) return
+    data = await res.json()
+  } catch { setConn(false); return }
+  setConn(true)
   const newOrders = data.orders || []
+  state.ordersOpen = data.ordersOpen !== false
+  renderOpenBtn()
 
   // Detect new arrivals
   const newIds = new Set(newOrders.map(o => o.id))
   newOrders.forEach(o => {
-    if (!state.lastIds.has(o.id) && o.status === 'paid') {
+    if (state.loaded && !state.lastIds.has(o.id) && o.status === 'paid') {
       playBeep()
       showAlert(`New order #${o.ticketNumber} arrived!`)
     }
   })
+  if (!state.loaded) { state.loaded = true } // don't beep for the backlog on first load
   state.lastIds = newIds
   state.orders = newOrders
   renderKDS()
 }
 
 async function updateStatus(id, status) {
-  await fetch(`/api/kds/${id}/status`, {
+  const r = await fetch(`/api/kds/${id}/status`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ status })
   })
-  if (status === 'ready') playAlert()
+  if (!r.ok) { const d = await r.json().catch(() => ({})); showAlert(escH(d.error || 'Could not update order')) }
+  else if (status === 'ready') playAlert()
   await fetchOrders()
 }
 
 async function togglePriority(id) {
   const order = state.orders.find(o => o.id === id)
   if (!order) return
-  await fetch(`/api/admin/orders/${id}/priority`, {
+  await fetch(`/api/kds/${id}/priority`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ priority: !order.priority })
   })
   await fetchOrders()
+}
+
+function setConn(ok) {
+  const el = qs('connWarn'); if (el) el.hidden = ok
+}
+function renderOpenBtn() {
+  const b = qs('openBtn'); if (!b) return
+  b.className = 'ctrl-btn open-btn ' + (state.ordersOpen ? 'is-open' : 'is-paused')
+  b.innerHTML = state.ordersOpen ? '<i class="fas fa-store"></i> Taking orders' : '<i class="fas fa-pause"></i> PAUSED — tap to resume'
+}
+window.toggleOpen = async function() {
+  const open = !state.ordersOpen
+  if (!open && !confirm('Pause ordering? Customers on the kiosk and website will see a "not taking orders" message. Orders already paid stay on this screen.')) return
+  const r = await fetch('/api/kds/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ open }) })
+  if (r.ok) { state.ordersOpen = open; renderOpenBtn() }
+}
+window.openSoldOut = async function() {
+  const r = await fetch('/api/kds/menu'); if (!r.ok) return
+  const { items } = await r.json()
+  state.menuItems = items
+  renderSoldOut()
+  qs('soldOutPanel').classList.remove('hidden')
+}
+function renderSoldOut() {
+  qs('soldOutList').innerHTML = state.menuItems.map(m => `
+    <button class="so-row ${m.available ? '' : 'out'}" onclick="toggleSoldOut('${escH(m.id)}')">
+      <span>${escH(m.image)} ${escH(m.name)}</span>
+      <span class="so-tag">${m.available ? 'Available' : 'SOLD OUT'}</span>
+    </button>`).join('')
+}
+window.toggleSoldOut = async function(id) {
+  const m = state.menuItems.find(x => x.id === id); if (!m) return
+  const r = await fetch('/api/kds/menu/' + encodeURIComponent(id), { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ available: !m.available }) })
+  if (r.ok) { m.available = !m.available; renderSoldOut() }
 }
 
 function showAlert(msg) {
@@ -217,6 +296,25 @@ function renderPickupBoard(readyOrders) {
 
 // ─── Mount + Start ────────────────────────────────────────────────────────────
 document.getElementById('app').innerHTML = `
+  <div id="connWarn" class="conn-warn" hidden><i class="fas fa-wifi"></i> Connection lost — retrying… (new orders may be delayed)</div>
+  <div id="kdsLogin" class="kds-login hidden">
+    <form class="kds-login-box" onsubmit="submitKdsLogin();return false">
+      <div style="font-size:42px">🍳</div>
+      <h2>Kitchen screen</h2>
+      <p>Enter the kitchen PIN</p>
+      <input id="kdsPinInput" type="password" inputmode="numeric" autocomplete="current-password" placeholder="PIN" aria-label="Kitchen PIN">
+      <div id="kdsLoginMsg" class="kds-login-msg" role="alert"></div>
+      <button type="submit">Unlock</button>
+    </form>
+  </div>
+  <div id="soldOutPanel" class="kds-login hidden" onclick="if(event.target===this)this.classList.add('hidden')">
+    <div class="kds-login-box so-box">
+      <h2><i class="fas fa-ban"></i> Sold out items</h2>
+      <p>Tap an item to mark it sold out (hidden from ordering) or available again.</p>
+      <div id="soldOutList" class="so-list"></div>
+      <button type="button" onclick="document.getElementById('soldOutPanel').classList.add('hidden')">Done</button>
+    </div>
+  </div>
   <div class="kds-header">
     <div class="kds-title">
       <div class="dot"></div>
@@ -231,8 +329,11 @@ document.getElementById('app').innerHTML = `
     <div class="kds-controls">
       <button id="soundBtn" class="sound-btn on" onclick="toggleSound()"><i class="fas fa-volume-up"></i> Sound</button>
       <button class="ctrl-btn" onclick="fetchOrders()"><i class="fas fa-sync-alt"></i> Refresh</button>
-      <a href="/kiosk" class="ctrl-btn" style="text-decoration:none"><i class="fas fa-tablet-alt"></i> Kiosk</a>
+      <button id="openBtn" class="ctrl-btn open-btn is-open" onclick="toggleOpen()"><i class="fas fa-store"></i> Taking orders</button>
+      <button class="ctrl-btn" onclick="openSoldOut()"><i class="fas fa-ban"></i> Sold out</button>
+      <a href="/pickup" target="_blank" rel="noopener" class="ctrl-btn" style="text-decoration:none"><i class="fas fa-bullhorn"></i> Pickup board</a>
       <a href="/admin" class="ctrl-btn" style="text-decoration:none"><i class="fas fa-cog"></i> Admin</a>
+      <button class="ctrl-btn" onclick="kdsLogout()" title="Lock this screen"><i class="fas fa-lock"></i></button>
     </div>
   </div>
 
